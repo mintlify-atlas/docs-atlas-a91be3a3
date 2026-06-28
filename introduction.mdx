@@ -1,0 +1,82 @@
+---
+title: "Bollard: Async Rust Client for Docker and Podman"
+sidebarTitle: "Introduction"
+description: "Bollard is an async Rust library for Docker and Podman, leveraging Hyper and Tokio for full async/await, streaming responses, and multi-transport support."
+---
+
+Bollard is an asynchronous Rust client library for the [Docker](https://github.com/moby/moby) and [Podman](https://github.com/containers/podman) container runtime APIs. Built on [Hyper](https://github.com/hyperium/hyper) and [Tokio](https://github.com/tokio-rs/tokio), it exposes a fully async API that embraces futures, streams, and the `async/await` paradigm. Whether you are automating container lifecycle management, building CI/CD tooling, or integrating container operations into a larger Rust service, Bollard gives you idiomatic, type-safe access to the full Docker Engine API — with no blocking calls.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Async/Await First" icon="bolt">
+    Every API call returns a `Future` or a `Stream`. No thread pools, no blocking — pure async Rust powered by Tokio.
+  </Card>
+  <Card title="Multiple Transports" icon="network-wired">
+    Connect via Unix socket, Windows named pipe, plain HTTP/TCP, SSH tunnel, or Rustls-secured HTTPS. Choose the right transport for your environment.
+  </Card>
+  <Card title="Docker & Podman" icon="box">
+    Both Docker and Podman are first-class runtimes. Automatic socket discovery handles rootless Podman out of the box on Unix systems.
+  </Card>
+  <Card title="BuildKit Support" icon="hammer">
+    Native integration with [BuildKit](https://github.com/moby/buildkit) for advanced image builds, including gRPC-based communication via the `buildkit` feature.
+  </Card>
+  <Card title="Swarm & Services" icon="server">
+    Full API coverage for Docker Swarm: create and manage services, tasks, nodes, secrets, and configs — everything you need for orchestrated deployments.
+  </Card>
+  <Card title="Streaming Responses" icon="wave-sine">
+    Pull image layers, tail container logs, and stream live container stats as async iterators using `futures_util::stream::TryStreamExt`.
+  </Card>
+</CardGroup>
+
+## Library Architecture
+
+Bollard is organized into focused modules, each corresponding to a Docker API resource group. The central entry point is the `Docker` struct, re-exported at the crate root.
+
+| Module | Description |
+|---|---|
+| `bollard::container` | Create, start, stop, inspect, and remove containers |
+| `bollard::image` | Pull, build, tag, push, and list images |
+| `bollard::network` | Create and manage Docker networks |
+| `bollard::volume` | Create and manage Docker volumes |
+| `bollard::exec` | Execute commands inside running containers |
+| `bollard::swarm` | Initialize and manage Docker Swarm clusters |
+| `bollard::service` | Deploy and manage Swarm services |
+| `bollard::system` | Daemon info, events, version negotiation, and pruning |
+| `bollard::grpc` | Low-level gRPC transport for BuildKit integration |
+| `bollard::models` | Re-exported serialization types from `bollard-stubs` |
+| `bollard::query_parameters` | Re-exported builder types for every API method's options |
+
+Serialization types (`bollard::models`) and query parameter builders (`bollard::query_parameters`) are generated from the Docker OpenAPI schema and BuildKit protobuf definitions, then re-exported directly from `bollard` — you do not need to add `bollard-stubs` as a separate dependency.
+
+## Docker API Version
+
+Bollard targets the Docker Engine API **v1.52** (the latest schema published by the moby project) and also supports **v1.53** via [version negotiation](https://docs.rs/bollard/latest/bollard/struct.Docker.html#method.negotiate_version). You can call `docker.negotiate_version().await` to automatically downgrade to the version your daemon actually supports.
+
+<Note>
+  The `bollard-stubs` crate that ships serialization types is versioned at `1.53.1-rc.29.3.1` to track the upstream OpenAPI schema releases. You do not need to manage this dependency manually — it is a re-export from `bollard`.
+</Note>
+
+## Latest Release
+
+Bollard is published to [crates.io](https://crates.io/crates/bollard). Add it to your project with:
+
+```toml Cargo.toml
+[dependencies]
+bollard = "0.21"
+```
+
+<Note>
+  Full API documentation is available at [docs.rs/bollard](https://docs.rs/bollard/). The source code and issue tracker are hosted at [github.com/fussybeaver/bollard](https://github.com/fussybeaver/bollard).
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Connect to a local Docker daemon, list containers, and stream stats in under 10 minutes.
+  </Card>
+  <Card title="Installation" icon="wrench" href="/installation">
+    Choose feature flags for your transport, TLS provider, datetime library, and BuildKit support.
+  </Card>
+</CardGroup>

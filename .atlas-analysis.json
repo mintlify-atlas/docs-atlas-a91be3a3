@@ -1,0 +1,226 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Bollard",
+  "projectDescription": "An asynchronous Rust client library for the Docker and Podman daemon API, built on Hyper and Tokio with support for Unix sockets, Windows named pipes, HTTPS/SSL, SSH tunnels, WebSocket attach, and BuildKit.",
+  "theme": "aspen",
+  "primaryColor": "#40993e",
+  "lightColor": "#183018",
+  "darkColor": "#e4e8e4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Connecting",
+            "pages": [
+              "connecting/local",
+              "connecting/http",
+              "connecting/ssl-tls",
+              "connecting/ssh",
+              "connecting/podman"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/containers",
+              "guides/images",
+              "guides/networks-volumes",
+              "guides/exec",
+              "guides/buildkit",
+              "guides/swarm",
+              "guides/error-handling"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/feature-flags",
+              "configuration/contexts",
+              "configuration/version-negotiation"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api-reference/docker-client",
+              "api-reference/system"
+            ]
+          },
+          {
+            "group": "Resources",
+            "pages": [
+              "api-reference/containers",
+              "api-reference/images",
+              "api-reference/networks",
+              "api-reference/volumes",
+              "api-reference/exec"
+            ]
+          },
+          {
+            "group": "Swarm & Orchestration",
+            "pages": [
+              "api-reference/swarm",
+              "api-reference/services",
+              "api-reference/nodes",
+              "api-reference/tasks",
+              "api-reference/secrets-configs"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "api-reference/buildkit",
+              "api-reference/plugins",
+              "api-reference/auth",
+              "api-reference/errors"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Async/await API built on Hyper and Tokio",
+    "Docker and Podman first-class support",
+    "Unix socket, Windows named pipe, HTTP, HTTPS (Rustls), and SSH transports",
+    "BuildKit support via gRPC/protobuf for advanced image builds",
+    "WebSocket container attach support",
+    "Auto-discovery of Podman rootless sockets",
+    "Docker context and DOCKER_HOST resolution",
+    "API version negotiation",
+    "Streaming responses as async Streams (stats, logs, build output)",
+    "Serialization types generated from OpenAPI and protobuf specs"
+  ],
+  "publicApiSurface": [
+    "Docker::connect_with_local_defaults()",
+    "Docker::connect_with_socket_defaults()",
+    "Docker::connect_with_http_defaults()",
+    "Docker::connect_with_ssl_defaults()",
+    "Docker::connect_with_ssh_defaults()",
+    "Docker::connect_with_podman_defaults()",
+    "Docker::connect_with_unix_defaults()",
+    "Docker::connect_with_named_pipe_defaults()",
+    "Docker::connect_with_context(name)",
+    "Docker::connect_with_current_context()",
+    "Docker::connect_with_custom_transport()",
+    "Docker::negotiate_version()",
+    "Docker::version()",
+    "Docker::info()",
+    "Docker::ping()",
+    "Docker::df()",
+    "Docker::list_containers()",
+    "Docker::create_container()",
+    "Docker::start_container()",
+    "Docker::stop_container()",
+    "Docker::restart_container()",
+    "Docker::remove_container()",
+    "Docker::inspect_container()",
+    "Docker::kill_container()",
+    "Docker::pause_container()",
+    "Docker::unpause_container()",
+    "Docker::rename_container()",
+    "Docker::update_container()",
+    "Docker::attach_container()",
+    "Docker::attach_container_websocket()",
+    "Docker::resize_container_tty()",
+    "Docker::top_processes()",
+    "Docker::container_changes()",
+    "Docker::prune_containers()",
+    "Docker::upload_to_container()",
+    "Docker::upload_to_container_streaming()",
+    "Docker::get_container_archive_info()",
+    "Docker::create_checkpoint()",
+    "Docker::list_checkpoints()",
+    "Docker::delete_checkpoint()",
+    "Docker::stats()",
+    "Docker::list_images()",
+    "Docker::create_image()",
+    "Docker::inspect_image()",
+    "Docker::remove_image()",
+    "Docker::tag_image()",
+    "Docker::push_image()",
+    "Docker::build_image()",
+    "Docker::export_image()",
+    "Docker::export_images()",
+    "Docker::import_image()",
+    "Docker::import_image_stream()",
+    "Docker::prune_images()",
+    "Docker::image_history()",
+    "Docker::search_images()",
+    "Docker::commit_container()",
+    "Docker::prune_build()",
+    "Docker::create_exec()",
+    "Docker::start_exec()",
+    "Docker::inspect_exec()",
+    "Docker::resize_exec()",
+    "Docker::list_networks()",
+    "Docker::create_network()",
+    "Docker::inspect_network()",
+    "Docker::remove_network()",
+    "Docker::connect_network()",
+    "Docker::disconnect_network()",
+    "Docker::prune_networks()",
+    "Docker::list_volumes()",
+    "Docker::create_volume()",
+    "Docker::inspect_volume()",
+    "Docker::remove_volume()",
+    "Docker::prune_volumes()",
+    "Docker::init_swarm()",
+    "Docker::inspect_swarm()",
+    "Docker::join_swarm()",
+    "Docker::leave_swarm()",
+    "Docker::update_swarm()",
+    "Docker::list_services()",
+    "Docker::create_service()",
+    "Docker::inspect_service()",
+    "Docker::delete_service()",
+    "Docker::update_service()",
+    "Docker::list_nodes()",
+    "Docker::inspect_node()",
+    "Docker::delete_node()",
+    "Docker::update_node()",
+    "Docker::list_tasks()",
+    "Docker::inspect_task()",
+    "Docker::task_logs()",
+    "Docker::list_secrets()",
+    "Docker::create_secret()",
+    "Docker::inspect_secret()",
+    "Docker::delete_secret()",
+    "Docker::update_secret()",
+    "Docker::list_configs()",
+    "Docker::create_config()",
+    "Docker::inspect_config()",
+    "Docker::delete_config()",
+    "Docker::update_config()",
+    "Docker::list_plugins()",
+    "Docker::inspect_plugin()",
+    "Docker::remove_plugin()",
+    "Docker::enable_plugin()",
+    "Docker::disable_plugin()",
+    "Docker::install_plugin()",
+    "Docker::push_plugin()",
+    "Docker::create_plugin()",
+    "Docker::upgrade_plugin()",
+    "Docker::set_plugin_config()",
+    "bollard::models (re-exported from bollard-stubs)",
+    "bollard::query_parameters (re-exported from bollard-stubs)",
+    "DockerCredentials",
+    "ClientVersion",
+    "API_DEFAULT_VERSION"
+  ]
+}

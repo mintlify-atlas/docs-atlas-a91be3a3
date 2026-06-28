@@ -1,0 +1,208 @@
+---
+title: "Connect Bollard to Docker with SSL/TLS via Rustls"
+sidebarTitle: "SSL/TLS"
+description: "Secure Bollard connections to remote Docker daemons using Rustls. Configure certificates via DOCKER_CERT_PATH or pass them directly."
+---
+
+Bollard uses [Rustls](https://github.com/rustls/rustls) to establish mutually-authenticated TLS connections to remote Docker daemons. Both the server certificate authority chain and the client certificate/key are configured through environment variables or passed directly to the connection constructor.
+
+<Note>
+  SSL/TLS support requires exactly **one** crypto-provider feature flag. Enabling more than one will cause a compile-time error. See the [feature flags](#feature-flags) section below for the full list.
+</Note>
+
+---
+
+## `Docker::connect_with_ssl_defaults`
+
+Reads the target host from `DOCKER_HOST` (falling back to `tcp://localhost:2375`) and locates certificates in the directory pointed to by `DOCKER_CERT_PATH`. The expected files are:
+
+| File | Purpose |
+|---|---|
+| `key.pem` | Client private key |
+| `cert.pem` | Client certificate |
+| `ca.pem` | Certificate authority chain used to verify the server |
+
+```rust
+use bollard::Docker;
+
+#[cfg(feature = "ssl")]
+let docker = Docker::connect_with_ssl_defaults().unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_ssl_defaults() -> Result<Docker, Error>
+```
+
+### Address resolution
+
+1. `DOCKER_HOST` environment variable (e.g. `tcp://docker.example.com:2376`).
+2. Falls back to `"tcp://localhost:2375"` if unset.
+
+### Certificate resolution (`default_cert_path`)
+
+The helper `DockerClientCertResolver::default_cert_path()` determines the certificate directory using this precedence:
+
+1. `DOCKER_CERT_PATH` environment variable.
+2. `DOCKER_CONFIG` environment variable.
+3. `~/.docker` (home directory fallback).
+
+---
+
+## `Docker::connect_with_ssl`
+
+Pass all parameters explicitly — useful when certificates are stored outside the default location, or when you need to connect to multiple daemons with different credentials.
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+use std::path::Path;
+
+#[cfg(feature = "ssl")]
+let docker = Docker::connect_with_ssl(
+    "tcp://docker.example.com:2376",
+    Path::new("/certs/key.pem"),
+    Path::new("/certs/cert.pem"),
+    Path::new("/certs/ca.pem"),
+    120,
+    API_DEFAULT_VERSION,
+).unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_ssl(
+    addr: &str,
+    ssl_key: &Path,
+    ssl_cert: &Path,
+    ssl_ca: &Path,
+    timeout: u64,
+    client_version: &ClientVersion,
+) -> Result<Docker, Error>
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `addr` | `&str` | Target URL — `tcp://` or `https://` scheme accepted. |
+| `ssl_key` | `&Path` | Path to the PEM-encoded private key (`key.pem`). |
+| `ssl_cert` | `&Path` | Path to the PEM-encoded client certificate (`cert.pem`). |
+| `ssl_ca` | `&Path` | Path to the PEM-encoded CA chain (`ca.pem`). |
+| `timeout` | `u64` | Read/write timeout in **seconds**. |
+| `client_version` | `&ClientVersion` | Docker API version to request. |
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `DOCKER_HOST` | URL of the Docker daemon, e.g. `tcp://docker.example.com:2376`. |
+| `DOCKER_CERT_PATH` | Directory containing `key.pem`, `cert.pem`, and `ca.pem`. |
+| `DOCKER_CONFIG` | Fallback directory for certificates when `DOCKER_CERT_PATH` is not set. |
+| `DOCKER_TLS_VERIFY` | When set (any non-empty value), `connect_with_host` will automatically use SSL for `tcp://` addresses. |
+
+---
+
+## Feature Flags
+
+Choose **exactly one** crypto provider. Enabling multiple providers will produce a compile error.
+
+<CardGroup cols={2}>
+  <Card title="ssl (recommended)" icon="shield-check">
+    Rustls backed by the [ring](https://github.com/briansmith/ring) cryptography library. This is the recommended option for most applications.
+
+    ```toml
+    bollard = { version = "*", features = ["ssl"] }
+    ```
+  </Card>
+  <Card title="aws-lc-rs (FIPS)" icon="building-columns">
+    Rustls backed by [aws-lc-rs](https://github.com/aws/aws-lc-rs). Use this when FIPS 140-3 compliance is required.
+
+    ```toml
+    bollard = { version = "*", features = ["aws-lc-rs"] }
+    ```
+  </Card>
+  <Card title="ssl_providerless" icon="wrench">
+    Rustls without a bundled crypto provider. You must call `CryptoProvider::install_default()` before creating any connection. Intended for advanced use cases that supply their own provider.
+
+    ```toml
+    bollard = { version = "*", features = ["ssl_providerless"] }
+    ```
+  </Card>
+  <Card title="webpki" icon="globe">
+    Replaces OS-native root certificates with [Mozilla's WebPKI root store](https://github.com/rustls/webpki-roots). Can be combined with any of the above provider features.
+
+    ```toml
+    bollard = { version = "*", features = ["ssl", "webpki"] }
+    ```
+  </Card>
+</CardGroup>
+
+<Warning>
+  When using `ssl_providerless` you **must** install a `CryptoProvider` before calling any connection method, otherwise the library will panic:
+
+  ```rust
+  rustls::crypto::ring::default_provider()
+      .install_default()
+      .expect("Failed to install ring crypto provider");
+  ```
+</Warning>
+
+---
+
+## Complete Example
+
+<Steps>
+  <Step title="Generate TLS certificates (server side)">
+    Use Docker's built-in `dockerd` TLS generation or [cert-manager](https://cert-manager.io/) to create your CA, server, and client certificate/key pairs. Place `ca.pem`, `cert.pem`, and `key.pem` in a known directory.
+  </Step>
+  <Step title="Add Bollard to Cargo.toml">
+    ```toml
+    [dependencies]
+    bollard = { version = "*", features = ["ssl"] }
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Connect using environment variables">
+    ```bash
+    export DOCKER_HOST=tcp://docker.example.com:2376
+    export DOCKER_CERT_PATH=/home/user/.docker/certs
+    ```
+
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_ssl_defaults()
+            .expect("Failed to connect with SSL");
+
+        let version = docker.version().await.unwrap();
+        println!("Connected securely to Docker {:?}", version.version);
+    }
+    ```
+  </Step>
+  <Step title="Or supply certificate paths explicitly">
+    ```rust
+    use bollard::{API_DEFAULT_VERSION, Docker};
+    use std::path::Path;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_ssl(
+            "tcp://docker.example.com:2376",
+            Path::new("/certs/key.pem"),
+            Path::new("/certs/cert.pem"),
+            Path::new("/certs/ca.pem"),
+            120,
+            API_DEFAULT_VERSION,
+        )
+        .expect("Failed to connect with SSL");
+
+        let version = docker.version().await.unwrap();
+        println!("Connected securely to Docker {:?}", version.version);
+    }
+    ```
+  </Step>
+</Steps>

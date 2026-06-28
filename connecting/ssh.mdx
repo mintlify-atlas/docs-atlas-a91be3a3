@@ -1,0 +1,185 @@
+---
+title: "Connect Bollard to Remote Docker via SSH Tunnel"
+sidebarTitle: "SSH Tunnel"
+description: "Use Bollard's SSH connector to tunnel Docker API calls over an SSH connection using openssh. Requires the ssh feature flag."
+---
+
+Bollard can tunnel all Docker API calls over an SSH connection using the [openssh](https://crates.io/crates/openssh) crate. This means you can reach a remote Docker daemon without opening any extra TCP ports — the only requirement is an SSH connection to the remote host.
+
+<Note>
+  The SSH transport requires the **`ssh`** feature flag, which is **not** enabled by default. Add it to your `Cargo.toml`:
+
+  ```toml
+  bollard = { version = "*", features = ["ssh"] }
+  ```
+</Note>
+
+---
+
+## `Docker::connect_with_ssh_defaults`
+
+Reads the target host from the `DOCKER_HOST` environment variable. If the variable is not set, it falls back to `DEFAULT_SSH_ADDRESS` (`ssh://localhost`).
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_ssh_defaults().unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_ssh_defaults() -> Result<Docker, Error>
+```
+
+### Address resolution
+
+1. `DOCKER_HOST` environment variable (e.g. `ssh://user@remote-host`).
+2. Falls back to `"ssh://localhost"` if unset.
+
+---
+
+## `Docker::connect_with_ssh`
+
+Use this when you need to specify the SSH target address, a custom timeout, a specific API version, or a path to an SSH keypair.
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+let docker = Docker::connect_with_ssh(
+    "ssh://user@remote-host",
+    120,
+    API_DEFAULT_VERSION,
+    None,   // use the default SSH key (~/.ssh/id_rsa etc.)
+).unwrap();
+```
+
+To specify a custom key file:
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+let docker = Docker::connect_with_ssh(
+    "ssh://deploy@builder.internal",
+    30,
+    API_DEFAULT_VERSION,
+    Some("/home/ci/.ssh/deploy_key".to_string()),
+).unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_ssh(
+    addr: &str,
+    timeout: u64,
+    client_version: &ClientVersion,
+    keypair_path: Option<String>,
+) -> Result<Docker, Error>
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `addr` | `&str` | Target URL — must use the `ssh://` scheme, e.g. `ssh://user@host`. |
+| `timeout` | `u64` | Read/write timeout in **seconds** (default helpers use `120`). |
+| `client_version` | `&ClientVersion` | Docker API version to request. Use `API_DEFAULT_VERSION`. |
+| `keypair_path` | `Option<String>` | Optional path to a PEM private key file. Pass `None` to use the SSH agent or default key locations. |
+
+---
+
+## Constants
+
+```rust
+use bollard::DEFAULT_SSH_ADDRESS;
+
+// DEFAULT_SSH_ADDRESS == "ssh://localhost"
+```
+
+| Constant | Value |
+|---|---|
+| `DEFAULT_SSH_ADDRESS` | `"ssh://localhost"` |
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `DOCKER_HOST` | SSH URL of the remote Docker daemon, e.g. `ssh://user@host` or `ssh://user@host:2222`. Consumed by `connect_with_ssh_defaults`. |
+
+---
+
+## SSH Key Setup
+
+Bollard's SSH connector delegates authentication to the openssh crate, which in turn uses the system's SSH tooling. Ensure one of the following is true before calling the connection methods:
+
+<Steps>
+  <Step title="SSH agent is running with the correct key loaded">
+    ```bash
+    eval "$(ssh-agent -s)"
+    ssh-add ~/.ssh/id_ed25519
+    ```
+  </Step>
+  <Step title="Default key files are present">
+    openssh will automatically try `~/.ssh/id_rsa`, `~/.ssh/id_ed25519`, `~/.ssh/id_ecdsa`, and `~/.ssh/id_dsa` in order.
+  </Step>
+  <Step title="Or supply an explicit keypair path">
+    Pass the full path to `connect_with_ssh` via the `keypair_path` parameter as shown in the example above.
+  </Step>
+</Steps>
+
+<Tip>
+  The remote user must be a member of the `docker` group (or equivalent) on the target host, or must have been granted access to the Docker socket, just as they would for a direct local connection.
+</Tip>
+
+---
+
+## Complete Example
+
+<Steps>
+  <Step title="Add Bollard to Cargo.toml">
+    ```toml
+    [dependencies]
+    bollard = { version = "*", features = ["ssh"] }
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Connect using the environment variable">
+    ```bash
+    export DOCKER_HOST=ssh://alice@build-server.internal
+    ```
+
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        // Reads DOCKER_HOST automatically
+        let docker = Docker::connect_with_ssh_defaults()
+            .expect("Failed to establish SSH tunnel");
+
+        let version = docker.version().await.unwrap();
+        println!("Remote Docker version: {:?}", version.version);
+    }
+    ```
+  </Step>
+  <Step title="Or connect with explicit parameters">
+    ```rust
+    use bollard::{API_DEFAULT_VERSION, Docker};
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_ssh(
+            "ssh://alice@build-server.internal",
+            120,
+            API_DEFAULT_VERSION,
+            None,
+        )
+        .expect("Failed to establish SSH tunnel");
+
+        let version = docker.version().await.unwrap();
+        println!("Remote Docker version: {:?}", version.version);
+    }
+    ```
+  </Step>
+</Steps>

@@ -1,0 +1,204 @@
+---
+title: "Installing Bollard: Feature Flags and Dependencies"
+sidebarTitle: "Installation"
+description: "Add Bollard to Cargo.toml and choose the right feature flags for your transport, TLS provider, datetime library, and BuildKit support."
+---
+
+Bollard is published to [crates.io](https://crates.io/crates/bollard) and can be added to any Rust project via Cargo. The crate uses Cargo feature flags to keep the default binary small while making optional capabilities — TLS, SSH, BuildKit, WebSocket, and datetime support — available on demand.
+
+## Basic Installation
+
+Add `bollard` and a Tokio runtime to your `Cargo.toml`:
+
+```toml Cargo.toml
+[dependencies]
+bollard = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+<Note>
+  The default feature set enables `http` (HTTP/TCP transport) and `pipe` (Unix sockets and Windows named pipes). This covers local Docker access on all platforms and remote access over plain TCP without TLS.
+</Note>
+
+## Quick Start: Choosing Features by Use Case
+
+| Use Case | Cargo.toml |
+|---|---|
+| Local Docker (Unix / Windows) | `bollard = "0.21"` _(defaults work)_ |
+| Remote Docker over HTTPS | `bollard = { version = "0.21", features = ["ssl"] }` |
+| SSH tunnel to remote Docker | `bollard = { version = "0.21", features = ["ssh"] }` |
+| BuildKit image builds | `bollard = { version = "0.21", features = ["buildkit", "chrono"] }` |
+| WebSocket container attach | `bollard = { version = "0.21", features = ["websocket"] }` |
+| Minimal binary size | `bollard = { version = "0.21", default-features = false, features = ["pipe"] }` |
+
+## Feature Flag Reference
+
+### Default Features
+
+Two features are enabled automatically. You can opt out with `default-features = false`.
+
+| Feature | Description |
+|---|---|
+| `http` | HTTP/TCP connector — enables `DOCKER_HOST=tcp://...` connections |
+| `pipe` | Unix socket (Linux/macOS) and Windows named pipe for local Docker/Podman |
+
+### Transport Features
+
+| Feature | Description |
+|---|---|
+| `http` | HTTP/TCP connector for remote Docker/Podman |
+| `pipe` | Unix socket / Windows named pipe for local Docker/Podman |
+| `ssh` | SSH tunnel connector via [openssh](https://crates.io/crates/openssh) |
+
+### TLS / SSL Features
+
+These features add encrypted transport using [Rustls](https://github.com/rustls/rustls). Pick **one** crypto provider:
+
+| Feature | Description |
+|---|---|
+| `ssl` | Rustls with the [ring](https://github.com/briansmith/ring) crypto provider — recommended for most projects |
+| `aws-lc-rs` | Rustls with the [aws-lc-rs](https://github.com/aws/aws-lc-rs) provider — FIPS-compliant |
+| `ssl_providerless` | Rustls without a bundled crypto provider — bring your own [`CryptoProvider`](https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html) |
+| `webpki` | Use Mozilla's root certificates (via `webpki-roots`) instead of OS-native certificates |
+
+<Warning>
+  Do not enable both `ssl` and `aws-lc-rs` at the same time. They bundle different crypto backends and will conflict. Choose one.
+</Warning>
+
+### DateTime Features
+
+These features add timestamp support in Docker events and log messages. Pick **one**:
+
+| Feature | Description |
+|---|---|
+| `chrono` | [Chrono](https://github.com/chronotope/chrono) date/time types for timestamps |
+| `time` | [Time 0.3](https://github.com/time-rs/time) date/time types for timestamps |
+
+<Warning>
+  `chrono` and `time` are mutually exclusive. Enabling both will cause a compilation error. Choose whichever datetime library your project already uses.
+</Warning>
+
+### BuildKit Features
+
+| Feature | Description |
+|---|---|
+| `buildkit` | Full [BuildKit](https://github.com/moby/buildkit) support, including gRPC transport. Automatically enables `ssl`. |
+| `buildkit_providerless` | BuildKit support without a bundled TLS crypto provider — bring your own `CryptoProvider`. |
+
+<Warning>
+  BuildKit requires either `chrono` or `time` to be enabled for timestamp handling in build sessions. Without one of them, the crate will not compile when `buildkit` is active.
+</Warning>
+
+```toml Cargo.toml
+# BuildKit with Chrono timestamps
+bollard = { version = "0.21", features = ["buildkit", "chrono"] }
+```
+
+### WebSocket Features
+
+| Feature | Description |
+|---|---|
+| `websocket` | Enables `Docker::attach_container_websocket` using [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite) |
+
+### Development Features
+
+| Feature | Description |
+|---|---|
+| `json_data_content` | Include the raw JSON payload inside deserialization error messages — useful for debugging API responses |
+
+## Cargo.toml Configuration Examples
+
+<CodeGroup>
+
+```toml Local Docker (default)
+[dependencies]
+bollard = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml Remote HTTPS with ring
+[dependencies]
+bollard = { version = "0.21", features = ["ssl"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml Remote HTTPS with FIPS (aws-lc-rs)
+[dependencies]
+bollard = { version = "0.21", features = ["aws-lc-rs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml SSH tunnel
+[dependencies]
+bollard = { version = "0.21", features = ["ssh"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml BuildKit + Chrono
+[dependencies]
+bollard = { version = "0.21", features = ["buildkit", "chrono"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml BuildKit + Time
+[dependencies]
+bollard = { version = "0.21", features = ["buildkit", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml WebSocket attach
+[dependencies]
+bollard = { version = "0.21", features = ["websocket"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+```
+
+```toml Minimal binary (no defaults)
+[dependencies]
+bollard = { version = "0.21", default-features = false, features = ["pipe"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+</CodeGroup>
+
+## Verifying Your Installation
+
+After updating `Cargo.toml`, run `cargo build` to fetch and compile Bollard and its dependencies. Then confirm the connection with a quick version check:
+
+```rust src/main.rs
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_local_defaults().unwrap();
+    let version = docker.version().await.unwrap();
+    println!("{:#?}", version);
+}
+```
+
+```bash
+cargo run
+```
+
+A successful run prints the daemon's API version, platform, and component information.
+
+<Tip>
+  The full API reference is available at [docs.rs/bollard](https://docs.rs/bollard/). Documentation is built with the `ssl` and `ssh` features enabled, so all transport methods appear in the online docs.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn about Bollard's architecture, modules, and API version support.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Connect to a daemon, list containers, and stream stats with working code examples.
+  </Card>
+</CardGroup>

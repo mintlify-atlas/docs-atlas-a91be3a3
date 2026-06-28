@@ -1,0 +1,330 @@
+---
+title: "Networks API Reference for Bollard"
+sidebarTitle: "Networks"
+description: "Reference for Bollard network methods: list, create, inspect, connect, disconnect, remove, and prune Docker networks."
+---
+
+The network API lets you create and manage user-defined Docker networks, attach containers to them, and clean up unused networks. All methods are on the `Docker` struct. Options builders are in `bollard::query_parameters`; request body structs are in `bollard::models`.
+
+## Methods
+
+### `list_networks`
+
+```rust
+pub async fn list_networks(
+    &self,
+    options: Option<ListNetworksOptions>,
+) -> Result<Vec<Network>, Error>
+```
+
+Returns a list of all networks on the daemon.
+
+**Options:** `ListNetworksOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `driver`, `id`, `label`, `name`, `scope`, `type`. |
+
+**Returns:** `Vec<Network>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListNetworksOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("label", vec!["maintainer=some_maintainer"]);
+
+let options = ListNetworksOptionsBuilder::default()
+    .filters(&filters)
+    .build();
+
+let networks = docker.list_networks(Some(options)).await.unwrap();
+for net in &networks {
+    println!("Network: {:?} driver={:?}", net.name, net.driver);
+}
+```
+
+---
+
+### `create_network`
+
+```rust
+pub async fn create_network(
+    &self,
+    config: NetworkCreateRequest,
+) -> Result<NetworkCreateResponse, Error>
+```
+
+Creates a new user-defined network.
+
+**Config:** `bollard::models::NetworkCreateRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `String` | Network name (required). |
+| `driver` | `Option<String>` | Network driver (e.g. `"bridge"`, `"overlay"`). Defaults to `"bridge"`. |
+| `ipam` | `Option<Ipam>` | Custom IPAM configuration (subnets, gateways). |
+| `options` | `Option<HashMap<String, String>>` | Driver-specific options. |
+| `labels` | `Option<HashMap<String, String>>` | Labels to apply to the network. |
+| `attachable` | `Option<bool>` | Allow containers to attach to this network manually. |
+| `ingress` | `Option<bool>` | Create a swarm routing-mesh network. |
+| `enable_ipv6` | `Option<bool>` | Enable IPv6 on this network. |
+
+**Returns:** `NetworkCreateResponse` — contains `id: Option<String>` and `warning: Option<String>`.
+
+```rust
+use bollard::Docker;
+use bollard::models::NetworkCreateRequest;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = NetworkCreateRequest {
+    name: String::from("my-app-network"),
+    ..Default::default()
+};
+
+let response = docker.create_network(config).await.unwrap();
+println!("Created network ID: {:?}", response.id);
+```
+
+---
+
+### `inspect_network`
+
+```rust
+pub async fn inspect_network(
+    &self,
+    network_name: &str,
+    options: Option<InspectNetworkOptions>,
+) -> Result<NetworkInspect, Error>
+```
+
+Returns detailed information about a network including connected containers and IPAM configuration.
+
+**Options:** `InspectNetworkOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `verbose` | `bool` | Include detailed task and service information for swarm networks. |
+| `scope` | `&str` | Filter containers attached at the given scope (`"local"`, `"swarm"`, `"global"`). |
+
+**Returns:** `NetworkInspect`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::InspectNetworkOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = InspectNetworkOptionsBuilder::default()
+    .verbose(true)
+    .scope("local")
+    .build();
+
+let network = docker.inspect_network("my-app-network", Some(options)).await.unwrap();
+println!("Driver: {:?}", network.driver);
+println!("Containers: {:?}", network.containers);
+```
+
+---
+
+### `remove_network`
+
+```rust
+pub async fn remove_network(&self, network_name: &str) -> Result<(), Error>
+```
+
+Removes a network by name or ID. The network must have no active endpoints (containers must be disconnected first).
+
+**Returns:** `()`
+
+```rust
+docker.remove_network("my-app-network").await.unwrap();
+```
+
+---
+
+### `connect_network`
+
+```rust
+pub async fn connect_network(
+    &self,
+    network_name: &str,
+    config: NetworkConnectRequest,
+) -> Result<(), Error>
+```
+
+Connects a running container to a network.
+
+**Config:** `bollard::models::NetworkConnectRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `container` | `String` | Container name or ID to connect. |
+| `endpoint_config` | `Option<EndpointSettings>` | Endpoint configuration including IP address assignment and aliases. |
+
+**Returns:** `()`
+
+```rust
+use bollard::Docker;
+use bollard::models::{NetworkConnectRequest, EndpointSettings, EndpointIpamConfig};
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = NetworkConnectRequest {
+    container: String::from("my-container"),
+    endpoint_config: Some(EndpointSettings {
+        ipam_config: Some(EndpointIpamConfig {
+            ipv4_address: Some(String::from("172.24.56.89")),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }),
+};
+
+docker.connect_network("my-app-network", config).await.unwrap();
+```
+
+---
+
+### `disconnect_network`
+
+```rust
+pub async fn disconnect_network(
+    &self,
+    network_name: &str,
+    config: NetworkDisconnectRequest,
+) -> Result<(), Error>
+```
+
+Disconnects a container from a network.
+
+**Config:** `bollard::models::NetworkDisconnectRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `container` | `String` | Container name or ID to disconnect. |
+| `force` | `Option<bool>` | Force disconnection even if the container is not running. |
+
+**Returns:** `()`
+
+```rust
+use bollard::Docker;
+use bollard::models::NetworkDisconnectRequest;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = NetworkDisconnectRequest {
+    container: String::from("my-container"),
+    force: Some(true),
+};
+
+docker.disconnect_network("my-app-network", config).await.unwrap();
+```
+
+---
+
+### `prune_networks`
+
+```rust
+pub async fn prune_networks(
+    &self,
+    options: Option<PruneNetworksOptions>,
+) -> Result<NetworkPruneResponse, Error>
+```
+
+Removes all unused networks (networks with no connected containers).
+
+**Options:** `PruneNetworksOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `until`, `label`. |
+
+**Returns:** `NetworkPruneResponse` — contains `networks_deleted: Option<Vec<String>>`.
+
+---
+
+## Network Lifecycle Example
+
+<CodeGroup>
+
+```rust Create, Connect, and Remove
+use bollard::Docker;
+use bollard::models::{NetworkCreateRequest, NetworkConnectRequest, NetworkDisconnectRequest};
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // 1. Create a bridge network
+    let net = docker
+        .create_network(NetworkCreateRequest {
+            name: String::from("demo-net"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    println!("Network ID: {:?}", net.id);
+
+    // 2. Connect a container
+    docker
+        .connect_network(
+            "demo-net",
+            NetworkConnectRequest {
+                container: String::from("my-container"),
+                endpoint_config: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // 3. Disconnect the container
+    docker
+        .disconnect_network(
+            "demo-net",
+            NetworkDisconnectRequest {
+                container: String::from("my-container"),
+                force: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+    // 4. Remove the network
+    docker.remove_network("demo-net").await.unwrap();
+    println!("Network removed");
+}
+```
+
+```rust Prune Unused Networks
+use bollard::Docker;
+use bollard::query_parameters::PruneNetworksOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    filters.insert("until", vec!["1h"]);
+
+    let options = PruneNetworksOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let result = docker.prune_networks(Some(options)).await.unwrap();
+    if let Some(deleted) = result.networks_deleted {
+        println!("Pruned {} networks", deleted.len());
+    }
+}
+```
+
+</CodeGroup>
+
+<Note>
+Network names are resolved by the daemon and can be either names or full/short IDs. Using the full ID is safest in automated workflows to avoid ambiguity.
+</Note>

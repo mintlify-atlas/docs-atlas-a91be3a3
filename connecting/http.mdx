@@ -1,0 +1,185 @@
+---
+title: "Connect Bollard to Remote Docker via HTTP/TCP"
+sidebarTitle: "HTTP/TCP"
+description: "Connect Bollard to a remote Docker daemon over plain HTTP/TCP using connect_with_http_defaults or the DOCKER_HOST environment variable."
+---
+
+Bollard can reach a remote Docker daemon over a plain HTTP/TCP connection. This is the simplest way to talk to a Docker host that has been configured to listen on a TCP port, and it is also the transport used when `DOCKER_HOST` is set to a `tcp://` or `http://` address.
+
+<Warning>
+  Plain HTTP transmits all Docker API traffic — including image layers, secrets passed as build arguments, and container exec payloads — **in clear text**. Use this transport only on trusted private networks or loopback. For any public or shared network, use [SSL/TLS](/connecting/ssl-tls) instead.
+</Warning>
+
+---
+
+## `Docker::connect_with_http_defaults`
+
+Reads the `DOCKER_HOST` environment variable to determine the target address. If the variable is not set, it falls back to `tcp://localhost:2375`.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_http_defaults().unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_http_defaults() -> Result<Docker, Error>
+```
+
+### How the address is resolved
+
+1. Read `DOCKER_HOST` from the environment.
+2. If unset, use `DEFAULT_TCP_ADDRESS` (`"tcp://localhost:2375"`).
+3. Strip the `tcp://` or `http://` scheme prefix before handing the address to Hyper.
+
+---
+
+## `Docker::connect_with_http`
+
+Use this when you need to specify the remote address, a custom timeout, or a specific API version at call time.
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+let docker = Docker::connect_with_http(
+    "tcp://192.168.1.100:2375",
+    120,
+    API_DEFAULT_VERSION,
+).unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_http(
+    addr: &str,
+    timeout: u64,
+    client_version: &ClientVersion,
+) -> Result<Docker, Error>
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `addr` | `&str` | Connection URL — `tcp://` or `http://` scheme with host and port. |
+| `timeout` | `u64` | Read/write timeout in **seconds** (default helpers use `120`). |
+| `client_version` | `&ClientVersion` | Docker API version to request. Use `API_DEFAULT_VERSION` for the latest supported version. |
+
+---
+
+## `Docker::connect_with_host`
+
+A higher-level dispatcher that selects the correct transport based on the URL scheme. For `tcp://` and `http://` addresses it routes to `connect_with_http` (and will automatically upgrade to SSL if `DOCKER_TLS_VERIFY` is set and the `ssl` feature is enabled).
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_host("tcp://docker.example.com:2375").unwrap();
+```
+
+### Function signature
+
+```rust
+pub fn connect_with_host(host: &str) -> Result<Docker, Error>
+```
+
+<Note>
+  `connect_with_host` also dispatches `unix://`, `npipe://`, `https://`, and `ssh://` schemes to the appropriate connector, making it useful as a single entry point when the transport is determined at runtime.
+</Note>
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `DOCKER_HOST` | Full URL of the Docker daemon. Examples: `tcp://localhost:2375`, `http://192.168.1.10:2375`. Accepted by both `connect_with_http_defaults` and `connect_with_host`. |
+
+---
+
+## Constants
+
+```rust
+use bollard::DEFAULT_TCP_ADDRESS;
+
+// DEFAULT_TCP_ADDRESS == "tcp://localhost:2375"
+```
+
+| Constant | Value |
+|---|---|
+| `DEFAULT_TCP_ADDRESS` | `"tcp://localhost:2375"` |
+
+---
+
+## Feature Flag
+
+<Note>
+  The HTTP connector requires the **`http`** feature, which is enabled by default. If you have disabled default features, add it explicitly:
+
+  ```toml
+  bollard = { version = "*", default-features = false, features = ["http"] }
+  ```
+</Note>
+
+---
+
+## Complete Example
+
+<Steps>
+  <Step title="Configure the Docker daemon for TCP (server side)">
+    Edit `/etc/docker/daemon.json` on the remote host and add a TCP listener. Restart Docker after saving.
+
+    ```json
+    {
+      "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2375"]
+    }
+    ```
+  </Step>
+  <Step title="Add Bollard to Cargo.toml">
+    ```toml
+    [dependencies]
+    bollard = "*"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Connect from your Rust application">
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        // Explicit address
+        let docker = Docker::connect_with_http(
+            "tcp://192.168.1.100:2375",
+            120,
+            &bollard::API_DEFAULT_VERSION,
+        )
+        .expect("Failed to connect");
+
+        let version = docker.version().await.unwrap();
+        println!("Connected to Docker {:?}", version.version);
+    }
+    ```
+  </Step>
+  <Step title="Or use the environment variable">
+    ```bash
+    export DOCKER_HOST=tcp://192.168.1.100:2375
+    cargo run
+    ```
+
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        // Reads DOCKER_HOST automatically
+        let docker = Docker::connect_with_http_defaults()
+            .expect("Failed to connect");
+
+        let version = docker.version().await.unwrap();
+        println!("Connected to Docker {:?}", version.version);
+    }
+    ```
+  </Step>
+</Steps>

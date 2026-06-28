@@ -1,0 +1,309 @@
+---
+title: "Running Commands Inside Docker Containers with exec"
+sidebarTitle: "Exec"
+description: "Use Bollard to run non-interactive and interactive commands inside running containers using create_exec, start_exec, and inspect_exec."
+---
+
+Docker exec lets you run a new process inside an already-running container without interfering with its primary process. Bollard models this as a two-step async flow: first **create** an exec instance with `create_exec`, then **start** it with `start_exec`. The result is either an attached stream of output or a detached fire-and-forget.
+
+## Creating an Exec Instance
+
+`create_exec` accepts a container name and a config that implements `Into<ExecConfig>`. The most common way to build the config is with `bollard::models::ExecConfig` directly.
+
+```rust
+use bollard::Docker;
+use bollard::models::ExecConfig;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let exec = docker
+    .create_exec(
+        "my-container",
+        ExecConfig {
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            cmd: Some(vec![
+                "ls".to_string(),
+                "-la".to_string(),
+                "/".to_string(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+println!("Exec ID: {}", exec.id);
+```
+
+Key fields of `ExecConfig`:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `cmd` | `Option<Vec<String>>` | Command and arguments to run |
+| `attach_stdout` | `Option<bool>` | Capture stdout |
+| `attach_stderr` | `Option<bool>` | Capture stderr |
+| `attach_stdin` | `Option<bool>` | Connect stdin (for interactive use) |
+| `tty` | `Option<bool>` | Allocate a pseudo-TTY |
+| `env` | `Option<Vec<String>>` | Extra environment variables (`KEY=value`) |
+| `working_dir` | `Option<String>` | Working directory inside the container |
+| `privileged` | `Option<bool>` | Run with extended privileges |
+| `user` | `Option<String>` | User to run as (`user`, `user:group`, `uid`, `uid:gid`) |
+
+<Note>
+  You can also use `bollard::exec::CreateExecOptions<T>` which is generic over
+  string types. It converts to `ExecConfig` via `From`. The `bollard::models::ExecConfig`
+  approach shown here is more ergonomic for most use cases.
+</Note>
+
+## Starting Exec
+
+`start_exec` takes the exec ID and an optional `StartExecOptions`. It returns `StartExecResults`.
+
+```rust
+use bollard::exec::StartExecOptions;
+
+let result = docker
+    .start_exec(
+        &exec.id,
+        None::<StartExecOptions>, // None defaults to attached mode
+    )
+    .await?;
+```
+
+`StartExecOptions` has two notable fields:
+
+- `detach: bool` — when `true`, the process starts in the background and `StartExecResults::Detached` is returned immediately.
+- `tty: bool` — allocate a TTY for the exec session.
+
+## Consuming Attached Output
+
+When exec is started in attached mode, `start_exec` returns `StartExecResults::Attached { output, input }`. The `output` field is a `Stream<Item = Result<LogOutput, Error>>`.
+
+```rust
+use bollard::exec::StartExecResults;
+use futures_util::stream::StreamExt;
+
+if let StartExecResults::Attached { mut output, .. } =
+    docker.start_exec(&exec.id, None).await?
+{
+    while let Some(Ok(msg)) = output.next().await {
+        print!("{msg}");
+    }
+} else {
+    unreachable!();
+}
+```
+
+<Note>
+  `LogOutput` implements `Display`, so `print!("{msg}")` prints the raw text.
+  Use `msg.into_bytes()` to get the raw `Bytes`, or match on the enum variants
+  (`LogOutput::StdOut`, `LogOutput::StdErr`, etc.) to handle stdout and stderr
+  separately.
+</Note>
+
+## Interactive Exec
+
+For interactive commands, set `attach_stdin: Some(true)` and `tty: Some(true)` when creating the exec, then write bytes to the `input` writer returned by `start_exec`.
+
+```rust
+use bollard::Docker;
+use bollard::models::ExecConfig;
+use bollard::exec::{StartExecOptions, StartExecResults};
+use futures_util::stream::StreamExt;
+use tokio::io::AsyncWriteExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let exec = docker
+    .create_exec(
+        "my-container",
+        ExecConfig {
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(true),
+            cmd: Some(vec!["sh".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+if let StartExecResults::Attached { mut output, mut input } =
+    docker
+        .start_exec(
+            &exec.id,
+            Some(StartExecOptions { tty: true, ..Default::default() }),
+        )
+        .await?
+{
+    // Send a command over stdin
+    input.write_all(b"echo hello from exec\n").await?;
+    input.write_all(b"exit\n").await?;
+
+    // Drain output
+    while let Some(Ok(msg)) = output.next().await {
+        print!("{msg}");
+    }
+}
+```
+
+## Inspecting Exec
+
+After the exec finishes, call `inspect_exec` to retrieve the exit code and running status.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let info = docker.inspect_exec(&exec.id).await?;
+
+println!("Running: {:?}", info.running);
+println!("Exit code: {:?}", info.exit_code);
+println!("PID: {:?}", info.pid);
+```
+
+`ExecInspectResponse` fields of interest:
+
+| Field | Description |
+|---|---|
+| `running` | `Option<bool>` — is the process still running? |
+| `exit_code` | `Option<i64>` — process exit code (available after completion) |
+| `pid` | `Option<i64>` — host PID of the exec process |
+
+## Resizing the Exec TTY
+
+When `tty: true`, you can resize the pseudo-terminal window with `resize_exec`.
+
+```rust
+use bollard::exec::ResizeExecOptions;
+
+docker
+    .resize_exec(
+        &exec.id,
+        ResizeExecOptions {
+            width: 220,
+            height: 50,
+        },
+    )
+    .await?;
+```
+
+<Note>
+  `resize_exec` only has an effect when the exec instance was created with
+  `tty: Some(true)`. Calling it on a non-TTY exec is a no-op on most Docker
+  daemon versions.
+</Note>
+
+## Full Working Example
+
+The following is the complete working example from the bollard repository. It pulls `alpine:3`, creates a container, runs `ls -l /` via exec, and cleans up.
+
+```rust
+//! Run a non-interactive command inside a container using docker exec
+
+use bollard::models::ContainerCreateBody;
+use bollard::Docker;
+
+use futures_util::stream::StreamExt;
+use futures_util::TryStreamExt;
+
+const IMAGE: &str = "alpine:3";
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // Pull the image
+    docker
+        .create_image(
+            Some(
+                bollard::query_parameters::CreateImageOptionsBuilder::default()
+                    .from_image(IMAGE)
+                    .build(),
+            ),
+            None,
+            None,
+        )
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    // Create a container with TTY enabled
+    let alpine_config = ContainerCreateBody {
+        image: Some(String::from(IMAGE)),
+        tty: Some(true),
+        ..Default::default()
+    };
+
+    let id = docker
+        .create_container(
+            None::<bollard::query_parameters::CreateContainerOptions>,
+            alpine_config,
+        )
+        .await?
+        .id;
+
+    docker
+        .start_container(
+            &id,
+            None::<bollard::query_parameters::StartContainerOptions>,
+        )
+        .await?;
+
+    // Create and start an exec instance
+    let exec = docker
+        .create_exec(
+            &id,
+            bollard::models::ExecConfig {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(
+                    vec!["ls", "-l", "/"]
+                        .into_iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await?
+        .id;
+
+    if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+        docker.start_exec(&exec, None).await?
+    {
+        while let Some(Ok(msg)) = output.next().await {
+            print!("{msg}");
+        }
+    } else {
+        unreachable!();
+    }
+
+    // Clean up
+    docker
+        .remove_container(
+            &id,
+            Some(
+                bollard::query_parameters::RemoveContainerOptionsBuilder::default()
+                    .force(true)
+                    .build(),
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
+```
+
+## `StartExecResults` Variants
+
+`StartExecResults` is a non-exhaustive enum with two variants:
+
+<CardGroup cols={2}>
+  <Card title="Attached" icon="plug">
+    The exec session is attached. Contains `output` (a `Stream<Item = Result<LogOutput, Error>>`) and `input` (an `AsyncWrite` sink for stdin). Use this when you need to read stdout/stderr or write to stdin.
+  </Card>
+  <Card title="Detached" icon="arrow-right">
+    Returned when `StartExecOptions { detach: true, .. }` is passed. The process runs in the background with no stream. Use this for fire-and-forget side-effects inside the container.
+  </Card>
+</CardGroup>

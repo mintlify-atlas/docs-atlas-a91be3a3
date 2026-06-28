@@ -1,0 +1,414 @@
+---
+title: "Advanced Image Builds with BuildKit in Bollard"
+sidebarTitle: "BuildKit"
+description: "Use Bollard's buildkit feature to run advanced multi-stage Docker image builds via gRPC, including cache mounts, SSH forwarding, and secret mounts."
+---
+
+BuildKit is Docker's next-generation image build subsystem, offering parallel stage execution, efficient layer caching, secret mounts, SSH forwarding, and multi-platform output. Bollard exposes two distinct paths for leveraging BuildKit: a lightweight approach that uses the standard `build_image` API with a BuildKit backend, and a full gRPC driver mode that communicates with BuildKit directly over protocol buffers for complete feature access.
+
+<Warning>
+The `buildkit` feature requires either the `chrono` or `time` feature to be enabled alongside it. BuildKit uses OAuth-based registry authentication that depends on RFC 3339 timestamp parsing — the crate will fail to compile if neither is present.
+</Warning>
+
+## Feature Flag Setup
+
+Add the `buildkit` feature (which bundles SSL support) along with a datetime crate to your `Cargo.toml`:
+
+```toml
+[dependencies]
+bollard = { version = "*", features = ["buildkit", "chrono"] }
+```
+
+Alternatively, use the `time` crate instead of `chrono`:
+
+```toml
+[dependencies]
+bollard = { version = "*", features = ["buildkit", "time"] }
+```
+
+<Note>
+`chrono` and `time` are mutually exclusive — enable only one. If you need BuildKit without a bundled TLS crypto provider, use `buildkit_providerless` and supply your own [`CryptoProvider`](https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html).
+</Note>
+
+---
+
+## Approach 1: Standard Build with BuildKit Backend
+
+The simplest way to use BuildKit is to pass `BuilderVersion::BuilderBuildKit` in your `BuildImageOptionsBuilder`. Bollard negotiates the BuildKit session over the standard Docker socket — no separate daemon required.
+
+<Steps>
+  <Step title="Create a gzip-compressed tar build context">
+    BuildKit expects a gzip-compressed tar archive containing your `Dockerfile` (and any other context files).
+
+    ```rust
+    use std::io::Write;
+
+    let dockerfile = String::from(
+        "FROM alpine as builder1
+    RUN touch bollard.txt
+    FROM alpine as builder2
+    RUN --mount=type=bind,from=builder1,target=mnt cp mnt/bollard.txt buildkit-bollard.txt
+    ENTRYPOINT ls buildkit-bollard.txt
+    ",
+    );
+
+    let mut header = tar::Header::new_gnu();
+    header.set_path("Dockerfile").unwrap();
+    header.set_size(dockerfile.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+
+    let mut tar = tar::Builder::new(Vec::new());
+    tar.append(&header, dockerfile.as_bytes()).unwrap();
+    let uncompressed = tar.into_inner().unwrap();
+
+    let mut c = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    c.write_all(&uncompressed).unwrap();
+    let compressed = c.finish().unwrap();
+    ```
+  </Step>
+
+  <Step title="Build with BuilderVersion::BuilderBuildKit">
+    Set `version` to `BuilderBuildKit` and optionally pass a `session` ID. When the `buildkit_providerless` feature is enabled, the session ID links the gRPC session to the build.
+
+    ```rust
+    use bollard::Docker;
+    use bollard::models::BuildInfoAux;
+    use futures_util::stream::StreamExt;
+    use http_body_util::Full;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_socket_defaults().unwrap();
+
+        // ... (build the compressed tar as above) ...
+
+        let id = "my-buildkit-session";
+        let build_image_options = bollard::query_parameters::BuildImageOptionsBuilder::default()
+            .t(id)
+            .dockerfile("Dockerfile")
+            .version(bollard::query_parameters::BuilderVersion::BuilderBuildKit)
+            .pull("true")
+            .session(id)
+            .build();
+
+        let mut image_build_stream = docker.build_image(
+            build_image_options,
+            None,
+            Some(http_body_util::Either::Left(Full::new(compressed.into()))),
+        );
+
+        while let Some(Ok(bollard::models::BuildInfo {
+            aux: Some(BuildInfoAux::BuildKit(inner)),
+            ..
+        })) = image_build_stream.next().await
+        {
+            println!("Response: {:?}", inner);
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+`BuilderVersion::BuilderBuildKit` requires a Docker daemon that has BuildKit enabled (Docker 18.09+). Modern Docker Desktop and recent Linux Engine versions enable BuildKit by default.
+</Tip>
+
+---
+
+## Approach 2: Full BuildKit gRPC Driver
+
+For advanced scenarios — registry push, cache import/export, secret mounts, SSH forwarding — use the full gRPC driver. This communicates with BuildKit directly over an upgraded HTTP/2 connection.
+
+### Drivers
+
+Bollard ships three driver implementations:
+
+<CardGroup cols={3}>
+  <Card title="Moby" icon="docker">
+    Upgrades the Docker daemon's `/session` and `/grpc` endpoints. No extra process needed — ideal for local development.
+  </Card>
+  <Card title="DockerContainer" icon="cube">
+    Spawns a `moby/buildkit` container and communicates via exec stdin/stdout. Provides an isolated BuildKit daemon.
+  </Card>
+  <Card title="Buildkitd" icon="server">
+    Connects to a standalone `buildkitd` process over TCP. For CI pipelines with a dedicated buildkit daemon.
+  </Card>
+</CardGroup>
+
+### ImageBuildFrontendOptions
+
+Frontend options control what the `dockerfile.v0` frontend does during the Solve request. Construct them with the builder:
+
+```rust
+use bollard::grpc::build::{
+    ImageBuildFrontendOptions,
+    ImageBuildPlatform,
+    SecretSource,
+    NamedContext,
+};
+use std::path::Path;
+
+let frontend_opts = ImageBuildFrontendOptions::builder()
+    // Path to Dockerfile inside the build context
+    .dockerfile(Path::new("Dockerfile"))
+    // Target build stage (multi-stage builds)
+    .target("production")
+    // Disable layer cache
+    .nocache(false)
+    // Pull base images even if cached locally
+    .pull(true)
+    // Build arguments (ARG instructions)
+    .buildarg("APP_VERSION", "1.2.3")
+    .buildarg("BUILD_ENV", "release")
+    // Image labels
+    .label("maintainer", "team@example.com")
+    .label("org.opencontainers.image.source", "https://github.com/example/repo")
+    // Target platform
+    .platforms(&ImageBuildPlatform {
+        os: "linux".into(),
+        architecture: "amd64".into(),
+        variant: None,
+    })
+    // Mount a file secret (referenced by RUN --mount=type=secret,id=api_key)
+    .set_secret("api_key", &SecretSource::File(Path::new("/run/secrets/api_key").to_path_buf()))
+    // Or mount an env var secret
+    .set_secret("db_pass", &SecretSource::Env("DATABASE_PASSWORD".into()))
+    // Forward the SSH agent (RUN --mount=type=ssh)
+    .enable_ssh(true)
+    // Additional named build context (override a named FROM stage or context)
+    .named_context("base", NamedContext { path: "docker-image://alpine:3.19".into() })
+    .build();
+```
+
+### Builder Method Reference
+
+| Method | Description |
+|--------|-------------|
+| `dockerfile(path)` | Path to the `Dockerfile` within the build context |
+| `target(stage)` | Named build stage to stop at (multi-stage builds) |
+| `nocache(bool)` | Disable all layer caching |
+| `pull(bool)` | Force re-pull of base images |
+| `buildarg(key, value)` | Set a `ARG` build variable |
+| `label(key, value)` | Attach a metadata label to the produced image |
+| `platforms(platform)` | Target [`ImageBuildPlatform`] (OS + architecture + optional variant) |
+| `set_secret(id, source)` | Provide a `SecretSource::File` or `SecretSource::Env` secret |
+| `enable_ssh(bool)` | Forward the host SSH agent via `SSH_AUTH_SOCK` |
+| `cacheto(entry)` | Export cache to a registry or local path |
+| `cachefrom(entry)` | Import cache from a registry or local path |
+| `named_context(key, value)` | Add a named additional build context |
+| `force_network_mode(mode)` | Override network mode for `RUN` steps |
+| `extrahost(host_ip)` | Add `/etc/hosts` entries |
+| `shmsize(bytes)` | Size of `/dev/shm` in bytes |
+
+### Export Types
+
+After a successful build the image can be exported in several formats via `ImageExporterEnum`:
+
+```rust
+use bollard::grpc::driver::ImageExporterEnum;
+use bollard::grpc::export::ImageExporterOutput;
+use std::path::Path;
+
+// Export as OCI tar archive
+let oci_exporter = ImageExporterEnum::OCI(
+    ImageExporterOutput::builder("docker.io/library/my-image:latest")
+        .dest(Path::new("/tmp/image.oci.tar"))
+);
+
+// Export as Docker tar archive (loadable with `docker load`)
+let docker_exporter = ImageExporterEnum::Docker(
+    ImageExporterOutput::builder("my-image:latest")
+        .dest(Path::new("/tmp/image.docker.tar"))
+);
+```
+
+Use `bollard::grpc::driver::Image::registry` to push directly to a registry without writing a local tar.
+
+---
+
+## Full Example: Multi-Stage Build
+
+This example mirrors the `examples/build_buildkit.rs` file in the Bollard repository. It performs a two-stage build entirely through the standard Docker socket using `BuilderVersion::BuilderBuildKit`.
+
+```rust
+use bollard::Docker;
+use bollard::models::BuildInfoAux;
+use futures_util::stream::StreamExt;
+use http_body_util::Full;
+use std::io::Write;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // Multi-stage Dockerfile: stage 1 creates a file, stage 2 copies it
+    let dockerfile = String::from(
+        "FROM alpine as builder1
+RUN touch bollard.txt
+FROM alpine as builder2
+RUN --mount=type=bind,from=builder1,target=mnt cp mnt/bollard.txt buildkit-bollard.txt
+ENTRYPOINT ls buildkit-bollard.txt
+",
+    );
+
+    // Pack the Dockerfile into a gzip-compressed tar
+    let mut header = tar::Header::new_gnu();
+    header.set_path("Dockerfile").unwrap();
+    header.set_size(dockerfile.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    let mut tar = tar::Builder::new(Vec::new());
+    tar.append(&header, dockerfile.as_bytes()).unwrap();
+    let uncompressed = tar.into_inner().unwrap();
+    let mut c = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    c.write_all(&uncompressed).unwrap();
+    let compressed = c.finish().unwrap();
+
+    let id = "bollard-build-buildkit-example";
+
+    let build_image_options = bollard::query_parameters::BuildImageOptionsBuilder::default()
+        .t(id)
+        .dockerfile("Dockerfile")
+        .version(bollard::query_parameters::BuilderVersion::BuilderBuildKit)
+        .pull("true")
+        .session(id)
+        .build();
+
+    let mut image_build_stream = docker.build_image(
+        build_image_options,
+        None,
+        Some(http_body_util::Either::Left(Full::new(compressed.into()))),
+    );
+
+    while let Some(Ok(bollard::models::BuildInfo {
+        aux: Some(BuildInfoAux::BuildKit(inner)),
+        ..
+    })) = image_build_stream.next().await
+    {
+        println!("Response: {:?}", inner);
+    }
+}
+```
+
+---
+
+## Cache Example: Registry Cache Import/Export
+
+This example mirrors `examples/build_buildkit_with_cache.rs`. It uses the `DockerContainerBuilder` driver to pull and push BuildKit cache layers to a registry, significantly speeding up repeated CI builds.
+
+```rust
+use bollard::Docker;
+use bollard::grpc::registry::ImageRegistryOutput;
+use bollard_buildkit_proto::moby::buildkit::v1::CacheOptionsEntry;
+use std::io::Write;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let dockerfile = String::from(
+        "FROM localhost:5000/alpine as builder1
+    RUN touch bollard.txt
+    FROM localhost:5000/alpine as builder2
+    RUN --mount=type=bind,from=builder1,target=mnt cp mnt/bollard.txt buildkit-bollard.txt
+    ENTRYPOINT ls buildkit-bollard.txt
+    ",
+    );
+
+    // Pack Dockerfile into compressed tar
+    let mut header = tar::Header::new_gnu();
+    header.set_path("Dockerfile").unwrap();
+    header.set_size(dockerfile.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    let mut tar = tar::Builder::new(Vec::new());
+    tar.append(&header, dockerfile.as_bytes()).unwrap();
+    let uncompressed = tar.into_inner().unwrap();
+    let mut c = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    c.write_all(&uncompressed).unwrap();
+    let compressed = c.finish().unwrap();
+
+    let name = "bollard-buildkit-with-cache-example";
+
+    let registry_addr =
+        std::env::var("REGISTRY_HTTP_ADDR").expect("Please set REGISTRY_HTTP_ADDR");
+
+    // Configure cache entries pointing at the registry
+    let mut cache_attrs = std::collections::HashMap::new();
+    cache_attrs.insert(String::from("mode"), String::from("max"));
+    cache_attrs.insert(
+        String::from("ref"),
+        format!("{}/buildkit_with_cache:build-cache", registry_addr),
+    );
+    let cache_from = CacheOptionsEntry {
+        r#type: String::from("registry"),
+        attrs: std::collections::HashMap::clone(&cache_attrs),
+    };
+    let cache_to = CacheOptionsEntry {
+        r#type: String::from("registry"),
+        attrs: cache_attrs,
+    };
+
+    // Build frontend options with cache import and export
+    let frontend_opts = bollard::grpc::build::ImageBuildFrontendOptions::builder()
+        .cachefrom(&cache_from)
+        .cacheto(&cache_to)
+        .pull(true)
+        .build();
+
+    // Registry output target
+    let output =
+        ImageRegistryOutput::builder(&format!("{}/{}:latest", registry_addr, name)).consume();
+
+    // Boot a DockerContainer driver (spawns moby/buildkit container)
+    let mut buildkit_builder =
+        bollard::grpc::driver::docker_container::DockerContainerBuilder::new(&docker);
+    buildkit_builder.env("JAEGER_TRACE=localhost:6831");
+    let driver = buildkit_builder.bootstrap().await.unwrap();
+
+    let load_input =
+        bollard::grpc::build::ImageBuildLoadInput::Upload(bytes::Bytes::from(compressed));
+
+    // Supply registry credentials
+    let credentials = bollard::auth::DockerCredentials {
+        username: Some("bollard".to_string()),
+        password: std::env::var("REGISTRY_PASSWORD").ok(),
+        ..Default::default()
+    };
+    let mut creds_hsh = std::collections::HashMap::new();
+    creds_hsh.insert("localhost:5000", credentials);
+
+    // Execute the build and push result to the registry
+    bollard::grpc::driver::Image::registry(
+        driver,
+        output,
+        frontend_opts,
+        load_input,
+        Some(creds_hsh),
+        None,
+    )
+    .await
+    .unwrap();
+}
+```
+
+<Tip>
+Set `mode=max` in the cache attributes to export all intermediate layer caches, not just the final stage. This dramatically improves cache hit rates in CI environments.
+</Tip>
+
+---
+
+## Notes and Requirements
+
+<Note>
+The `DockerContainerBuilder` pulls the `moby/buildkit:master` image by default. You can pin a specific version or mirror in air-gapped environments by setting the image via `DockerContainerBuilder` options before calling `bootstrap()`.
+</Note>
+
+<Warning>
+SSH forwarding (`enable_ssh(true)`) requires the `SSH_AUTH_SOCK` environment variable to point to a running SSH agent on the host. Bollard forwards the agent socket into the BuildKit session transparently — if `SSH_AUTH_SOCK` is absent the gRPC handshake will fail with an explicit error.
+</Warning>
+
+<Warning>
+Secret data passed via `SecretSource::File` is streamed into BuildKit over the gRPC session and is never persisted in the final image layers. The maximum supported secret size is 500 KB. Secrets are only accessible within `RUN --mount=type=secret` instructions.
+</Warning>

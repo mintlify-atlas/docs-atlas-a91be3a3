@@ -1,0 +1,513 @@
+---
+title: "Plugins API Reference for Bollard"
+sidebarTitle: "Plugins"
+description: "Reference for Bollard plugin methods: list, inspect, install, enable, disable, upgrade, push, create, and remove Docker plugins."
+---
+
+Docker plugins extend the Docker Engine with additional capabilities — custom volume drivers, network drivers, authorisation plugins, and more. Bollard provides a complete plugin management API through the `Docker` client. All methods are `async` and return `Result<T, bollard::errors::Error>`.
+
+---
+
+## `list_plugins`
+
+Return a list of installed plugins, with optional filtering.
+
+```rust
+pub async fn list_plugins(
+    &self,
+    options: Option<ListPluginsOptions>,
+) -> Result<Vec<Plugin>, Error>
+```
+
+### Options — `ListPluginsOptionsBuilder`
+
+| Builder method | Description |
+|---|---|
+| `.filters(&HashMap<String, Vec<String>>)` | Filter by `capability` (e.g. `volumedriver`, `networkdriver`, `authz`) or `enable` (`true` \| `false`). |
+
+### Returns
+
+`Result<Vec<Plugin>, Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListPluginsOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("capability".to_string(), vec!["volumedriver".to_string()]);
+
+    let options = ListPluginsOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let plugins = docker.list_plugins(Some(options)).await?;
+    for plugin in &plugins {
+        println!("{} — enabled: {}", plugin.name, plugin.enabled);
+    }
+    Ok(())
+}
+```
+
+---
+
+## `inspect_plugin`
+
+Fetch detailed information about a specific plugin by name.
+
+```rust
+pub async fn inspect_plugin(
+    &self,
+    plugin_name: &str,
+) -> Result<Plugin, Error>
+```
+
+### Returns
+
+`Result<Plugin, Error>` — a [`Plugin`](https://docs.rs/bollard/latest/bollard/models/struct.Plugin.html) model containing `id`, `name`, `enabled`, `settings`, `plugin_reference`, and `config`.
+
+### Example
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let plugin = docker.inspect_plugin("vieux/sshfs:latest").await?;
+    println!("Plugin ID: {}", plugin.id.unwrap_or_default());
+    println!("Enabled: {}", plugin.enabled);
+    Ok(())
+}
+```
+
+---
+
+## `get_plugin_privileges`
+
+Retrieve the list of privileges required to install a plugin. Call this before `install_plugin` so you can present the privileges to the user for confirmation.
+
+```rust
+pub async fn get_plugin_privileges(
+    &self,
+    options: GetPluginPrivilegesOptions,
+) -> Result<Vec<PluginPrivilege>, Error>
+```
+
+### Options — `GetPluginPrivilegesOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.remote(&str)` | `&str` | The plugin reference, e.g. `"vieux/sshfs:latest"`. |
+
+### Returns
+
+`Result<Vec<PluginPrivilege>, Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::GetPluginPrivilegesOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = GetPluginPrivilegesOptionsBuilder::default()
+        .remote("vieux/sshfs:latest")
+        .build();
+
+    let privileges = docker.get_plugin_privileges(options).await?;
+    for priv_item in &privileges {
+        println!("{:?}: {:?}", priv_item.name, priv_item.value);
+    }
+    Ok(())
+}
+```
+
+---
+
+## `install_plugin`
+
+Pull and install a plugin from a registry. Returns a progress stream. You must first obtain the required privileges with `get_plugin_privileges` and pass them in.
+
+```rust
+pub fn install_plugin(
+    &self,
+    options: InstallPluginOptions,
+    privileges: Vec<PluginPrivilege>,
+    credentials: Option<DockerCredentials>,
+) -> impl Stream<Item = Result<CreateImageInfo, Error>> + '_
+```
+
+### Options — `InstallPluginOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.remote(&str)` | `&str` | Plugin reference to install, e.g. `"vieux/sshfs:latest"`. |
+| `.name(&str)` | `&str` | Local alias to install the plugin under. |
+
+### Returns
+
+`impl Stream<Item = Result<CreateImageInfo, Error>>` — streams JSON progress events during the pull and install.
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::{GetPluginPrivilegesOptionsBuilder, InstallPluginOptionsBuilder};
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    // Step 1: fetch required privileges
+    let priv_opts = GetPluginPrivilegesOptionsBuilder::default()
+        .remote("vieux/sshfs:latest")
+        .build();
+    let privileges = docker.get_plugin_privileges(priv_opts).await?;
+
+    // Step 2: install granting those privileges
+    let install_opts = InstallPluginOptionsBuilder::default()
+        .remote("vieux/sshfs:latest")
+        .name("sshfs")
+        .build();
+
+    let mut stream = docker.install_plugin(install_opts, privileges, None);
+    while let Some(info) = stream.try_next().await? {
+        println!("{:?}", info.status);
+    }
+    println!("Plugin installed");
+    Ok(())
+}
+```
+
+---
+
+## `create_plugin`
+
+Create a plugin from a local tar archive containing the `rootfs/` directory and a `config.json` file.
+
+```rust
+pub async fn create_plugin(
+    &self,
+    options: CreatePluginOptions,
+    tar: BodyType,
+) -> Result<(), Error>
+```
+
+### Options — `CreatePluginOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.name(&str)` | `&str` | Plugin name in `name:tag` format. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::CreatePluginOptionsBuilder;
+use bollard::body_full;
+use std::fs;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = CreatePluginOptionsBuilder::default()
+        .name("my-plugin:latest")
+        .build();
+
+    let tar_bytes = fs::read("plugin.tar.gz").unwrap();
+    docker.create_plugin(options, body_full(tar_bytes.into())).await?;
+    println!("Plugin created");
+    Ok(())
+}
+```
+
+---
+
+## `enable_plugin`
+
+Activate an installed plugin.
+
+```rust
+pub async fn enable_plugin(
+    &self,
+    plugin_name: &str,
+    options: Option<EnablePluginOptions>,
+) -> Result<(), Error>
+```
+
+### Options — `EnablePluginOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.timeout(i64)` | `i64` | Timeout in seconds to wait for the plugin to be ready. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::EnablePluginOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = EnablePluginOptionsBuilder::default()
+        .timeout(30)
+        .build();
+
+    docker.enable_plugin("vieux/sshfs:latest", Some(options)).await?;
+    println!("Plugin enabled");
+    Ok(())
+}
+```
+
+---
+
+## `disable_plugin`
+
+Deactivate a running plugin. Services using the plugin must be stopped first unless `force` is set.
+
+```rust
+pub async fn disable_plugin(
+    &self,
+    plugin_name: &str,
+    options: Option<DisablePluginOptions>,
+) -> Result<(), Error>
+```
+
+### Options — `DisablePluginOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.force(bool)` | `bool` | Force-disable even if the plugin is in use. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::DisablePluginOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = DisablePluginOptionsBuilder::default()
+        .force(false)
+        .build();
+
+    docker.disable_plugin("vieux/sshfs:latest", Some(options)).await?;
+    println!("Plugin disabled");
+    Ok(())
+}
+```
+
+---
+
+## `upgrade_plugin`
+
+Upgrade an installed plugin to a newer version. The plugin must be disabled first. Pass the new privileges obtained via `get_plugin_privileges`.
+
+```rust
+pub async fn upgrade_plugin(
+    &self,
+    plugin_name: &str,
+    options: UpgradePluginOptions,
+    privileges: Vec<PluginPrivilege>,
+    credentials: Option<DockerCredentials>,
+) -> Result<(), Error>
+```
+
+### Options — `UpgradePluginOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.remote(&str)` | `&str` | The new plugin image reference to upgrade to. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::{
+    DisablePluginOptionsBuilder, GetPluginPrivilegesOptionsBuilder, UpgradePluginOptionsBuilder,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    // Disable before upgrading
+    docker.disable_plugin("vieux/sshfs:latest", None).await?;
+
+    // Get privileges for the new version
+    let priv_opts = GetPluginPrivilegesOptionsBuilder::default()
+        .remote("vieux/sshfs:next")
+        .build();
+    let privileges = docker.get_plugin_privileges(priv_opts).await?;
+
+    let options = UpgradePluginOptionsBuilder::default()
+        .remote("vieux/sshfs:next")
+        .build();
+
+    docker.upgrade_plugin("vieux/sshfs:latest", options, privileges, None).await?;
+    println!("Plugin upgraded");
+    Ok(())
+}
+```
+
+---
+
+## `push_plugin`
+
+Push a locally installed plugin to a registry.
+
+```rust
+pub async fn push_plugin(
+    &self,
+    plugin_name: &str,
+    credentials: Option<DockerCredentials>,
+) -> Result<(), Error>
+```
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::auth::DockerCredentials;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let credentials = Some(DockerCredentials {
+        username: Some("myuser".to_string()),
+        password: Some("mypassword".to_string()),
+        ..Default::default()
+    });
+
+    docker.push_plugin("myuser/my-plugin:latest", credentials).await?;
+    println!("Plugin pushed");
+    Ok(())
+}
+```
+
+---
+
+## `set_plugin_config`
+
+Configure a plugin by setting its environment variables or other settings. Values are passed as `"KEY=value"` strings.
+
+```rust
+pub async fn set_plugin_config(
+    &self,
+    plugin_name: &str,
+    config: Vec<String>,
+) -> Result<(), Error>
+```
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let config = vec![
+        "DEBUG=1".to_string(),
+        "MAX_CONNECTIONS=100".to_string(),
+    ];
+
+    docker.set_plugin_config("vieux/sshfs:latest", config).await?;
+    println!("Plugin configured");
+    Ok(())
+}
+```
+
+---
+
+## `remove_plugin`
+
+Uninstall a plugin. Returns the removed `Plugin` object.
+
+```rust
+pub async fn remove_plugin(
+    &self,
+    plugin_name: &str,
+    options: Option<RemovePluginOptions>,
+) -> Result<Plugin, Error>
+```
+
+### Options — `RemovePluginOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.force(bool)` | `bool` | Force removal even if the plugin is enabled. |
+
+### Returns
+
+`Result<Plugin, Error>` — the plugin as it existed before removal.
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::RemovePluginOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    // Disable before removing (unless using force)
+    docker.disable_plugin("vieux/sshfs:latest", None).await?;
+
+    let options = RemovePluginOptionsBuilder::default()
+        .force(false)
+        .build();
+
+    let removed = docker.remove_plugin("vieux/sshfs:latest", Some(options)).await?;
+    println!("Removed plugin: {}", removed.name);
+    Ok(())
+}
+```
+
+<Tip>
+The recommended plugin lifecycle is: `get_plugin_privileges` → `install_plugin` → `enable_plugin`. For removal: `disable_plugin` → `remove_plugin`. Always disable a plugin before removing or upgrading it to avoid disrupting running containers.
+</Tip>

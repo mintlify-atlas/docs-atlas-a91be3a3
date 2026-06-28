@@ -1,0 +1,184 @@
+---
+title: "Docker API Version Negotiation in Bollard"
+sidebarTitle: "Version Negotiation"
+description: "Bollard defaults to Docker API v1.53 and supports downgrade negotiation via negotiate_version() for compatibility with older Docker daemons."
+---
+
+Bollard communicates with the Docker Engine API using a versioned URL prefix (e.g. `/v1.53/containers/json`). By default it targets the most recent API version it was built against. When connecting to an older Docker daemon you can ask Bollard to negotiate the highest mutually-supported version automatically — no manual version pinning required.
+
+## Default API Version
+
+Bollard ships with the following compile-time default, exported as a public constant:
+
+```rust
+pub const API_DEFAULT_VERSION: &ClientVersion = &ClientVersion {
+    major_version: 1,
+    minor_version: 53,
+};
+```
+
+Every connection method (e.g. `Docker::connect_with_local_defaults()`) uses `API_DEFAULT_VERSION` unless you supply a different `ClientVersion` through the lower-level parameterised constructors such as `Docker::connect_with_http()`.
+
+<Note>
+  Bollard's serialization stubs are generated from the Docker API v1.52/v1.53 OpenAPI schema published by the [moby](https://github.com/moby/moby) project. Negotiating down to an older version changes only the URL prefix — response fields that exist only in newer API versions will simply be absent or `null`.
+</Note>
+
+## The `ClientVersion` Struct
+
+```rust
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct ClientVersion {
+    /// The major version number.
+    pub major_version: usize,
+    /// The minor version number.
+    pub minor_version: usize,
+}
+```
+
+`ClientVersion` implements `Display` as `"{major}.{minor}"` (e.g. `"1.53"`) and `PartialOrd` for numeric comparison, so Bollard can determine whether the server's reported version is older than the client's current setting.
+
+## Version Negotiation
+
+### `Docker::negotiate_version()`
+
+An async method that queries `GET /version` on the connected daemon, parses the server's `ApiVersion` field, and — if the server reports an older version than the client is currently using — atomically downgrades the client version in place. The updated `Docker` instance is returned so calls can be chained.
+
+```rust
+pub async fn negotiate_version(self) -> Result<Self, Error>
+```
+
+<Tip>
+  Call `negotiate_version()` immediately after constructing a `Docker` instance when your application may connect to daemons of different ages, such as in CI pipelines or multi-environment deployments.
+</Tip>
+
+<Note>
+  Version negotiation makes an additional HTTP round-trip to `GET /version`. For latency-sensitive startup paths where the daemon version is known, you can skip negotiation and supply the version directly via the parameterised constructors.
+</Note>
+
+### `Docker::client_version()`
+
+Returns the `ClientVersion` that is currently set on the client — either the compile-time default or the value negotiated after calling `negotiate_version()`.
+
+```rust
+pub fn client_version(&self) -> ClientVersion
+```
+
+## Timeout Methods
+
+Bollard applies a single timeout to every request. The default is **120 seconds** (2 minutes).
+
+### `Docker::with_timeout(duration)`
+
+Builder-style method that returns a new `Docker` instance with the given timeout. Designed for method chaining.
+
+```rust
+pub fn with_timeout(mut self, timeout: Duration) -> Self
+```
+
+### `Docker::timeout()`
+
+Returns the currently configured timeout as a `std::time::Duration`.
+
+```rust
+pub fn timeout(&self) -> Duration
+```
+
+## Code Examples
+
+<CodeGroup>
+
+```rust Basic version negotiation
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect then immediately negotiate down to the daemon's version
+    let docker = Docker::connect_with_local_defaults()?
+        .negotiate_version()
+        .await?;
+
+    println!("Negotiated API version: {}", docker.client_version());
+    Ok(())
+}
+```
+
+```rust Check version before negotiation
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let docker = Docker::connect_with_local_defaults()?;
+
+    println!("Default version: {}", docker.client_version());
+
+    let docker = docker.negotiate_version().await?;
+    println!("Negotiated version: {}", docker.client_version());
+
+    Ok(())
+}
+```
+
+```rust Custom timeout with negotiation
+use bollard::Docker;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let docker = Docker::connect_with_local_defaults()?
+        .with_timeout(Duration::from_secs(30))
+        .negotiate_version()
+        .await?;
+
+    println!("Timeout: {:?}", docker.timeout());
+    println!("API version: {}", docker.client_version());
+    Ok(())
+}
+```
+
+```rust Pin a specific version (no negotiation)
+use bollard::{Docker, ClientVersion, API_DEFAULT_VERSION};
+
+// Supply an explicit version to the parameterised constructor
+let docker = Docker::connect_with_http(
+    "tcp://old-docker-host:2375",
+    120,
+    &ClientVersion { major_version: 1, minor_version: 41 },
+)?;
+
+println!("Pinned version: {}", docker.client_version());
+```
+
+</CodeGroup>
+
+## How Negotiation Works
+
+<Steps>
+  <Step title="Client sends GET /version">
+    Bollard issues a request to the daemon's `/version` endpoint using the current client version prefix.
+  </Step>
+
+  <Step title="Daemon responds with its API version">
+    The response includes an `ApiVersion` field such as `"1.41"`.
+  </Step>
+
+  <Step title="Bollard compares versions">
+    If `server_version < client_version`, the client's major and minor version atomics are updated to the server's values.
+  </Step>
+
+  <Step title="All subsequent requests use the negotiated version">
+    Every future API call on that `Docker` instance uses the lower version in its URL prefix, ensuring compatibility.
+  </Step>
+</Steps>
+
+<Note>
+  Bollard will never **upgrade** above `API_DEFAULT_VERSION` during negotiation. If the server reports a higher version than the client default, the client version is left unchanged.
+</Note>
+
+## Version Reference
+
+| Constant | Value |
+|----------|-------|
+| `API_DEFAULT_VERSION` | `ClientVersion { major_version: 1, minor_version: 53 }` |
+| Default timeout | 120 seconds |
+| Negotiation endpoint | `GET /version` |
+| Serialization schema | Docker API v1.52 / v1.53 (moby OpenAPI) |

@@ -1,0 +1,203 @@
+---
+title: "Bollard Feature Flags: Configure Transport and TLS"
+sidebarTitle: "Feature Flags"
+description: "Control Bollard's capabilities with Cargo feature flags. Choose transport, TLS provider, datetime library, BuildKit, WebSocket, and debug features."
+---
+
+Bollard uses a modular feature system powered by Cargo feature flags. Rather than compiling every capability into every binary, you opt in to exactly the transports, TLS providers, and integrations your application needs. This keeps compile times short, binary sizes small, and dependency trees clean.
+
+## Default Features
+
+Out of the box, two features are enabled automatically:
+
+- **`http`** — TCP/HTTP connector for reaching remote Docker or Podman daemons (e.g. `DOCKER_HOST=tcp://...`)
+- **`pipe`** — Unix domain sockets on Linux/macOS and Windows Named Pipes for local daemon connections
+
+For most local development workflows no additional configuration is required.
+
+```toml
+# Cargo.toml — defaults are enough for local Docker
+[dependencies]
+bollard = "*"
+```
+
+## Quick Start
+
+| Use Case | Cargo.toml |
+|----------|------------|
+| Local Docker (Unix/Windows) | `bollard = "*"` _(defaults work)_ |
+| Remote Docker over HTTPS | `bollard = { version = "*", features = ["ssl"] }` |
+| SSH tunnel to remote Docker | `bollard = { version = "*", features = ["ssh"] }` |
+| BuildKit image builds | `bollard = { version = "*", features = ["buildkit", "chrono"] }` |
+| WebSocket container attach | `bollard = { version = "*", features = ["websocket"] }` |
+| Minimal binary size | `bollard = { version = "*", default-features = false, features = ["pipe"] }` |
+
+## Transport Features
+
+Choose the transport(s) that match how your application reaches the Docker daemon.
+
+| Feature | Description |
+|---------|-------------|
+| `http` | HTTP/TCP connector for remote Docker/Podman. Enabled by default. |
+| `pipe` | Unix socket (Linux/macOS) and Windows Named Pipe for local Docker/Podman. Enabled by default. |
+| `ssh` | SSH tunnel connector via the `openssh` crate. |
+
+<CodeGroup>
+
+```toml HTTP (default)
+[dependencies]
+bollard = "*"  # http + pipe enabled by default
+```
+
+```toml SSH tunnel
+[dependencies]
+bollard = { version = "*", features = ["ssh"] }
+```
+
+```toml Minimal (pipe only)
+[dependencies]
+bollard = { version = "*", default-features = false, features = ["pipe"] }
+```
+
+</CodeGroup>
+
+## TLS / SSL Features
+
+Enable HTTPS connections to a TLS-secured Docker daemon. Bollard uses [Rustls](https://github.com/rustls/rustls) for all TLS — no OpenSSL dependency required.
+
+| Feature | Description |
+|---------|-------------|
+| `ssl` | Rustls with the [ring](https://github.com/briansmith/ring) crypto provider. Recommended for most users. |
+| `aws-lc-rs` | Rustls with the [aws-lc-rs](https://github.com/aws/aws-lc-rs) crypto provider. Choose this for FIPS compliance. |
+| `ssl_providerless` | Rustls without a bundled crypto provider. You must call [`CryptoProvider::install_default()`](https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html) before constructing a `Docker` client. |
+| `webpki` | Use Mozilla's WebPKI root certificate bundle instead of OS-native certificates. |
+
+<Warning>
+  `ssl` and `aws-lc-rs` each install a different Rustls crypto provider. Enable only one. If you need to supply your own provider, use `ssl_providerless` instead.
+</Warning>
+
+<CodeGroup>
+
+```toml Ring provider (recommended)
+[dependencies]
+bollard = { version = "*", features = ["ssl"] }
+```
+
+```toml AWS-LC provider (FIPS)
+[dependencies]
+bollard = { version = "*", features = ["aws-lc-rs"] }
+```
+
+```toml Bring-your-own provider
+[dependencies]
+bollard = { version = "*", features = ["ssl_providerless"] }
+```
+
+```toml WebPKI root certs
+[dependencies]
+bollard = { version = "*", features = ["ssl", "webpki"] }
+```
+
+</CodeGroup>
+
+<Note>
+  When using `ssl` or `aws-lc-rs`, Bollard reads certificates from the path given by `DOCKER_CERT_PATH` (or `DOCKER_CONFIG` as a fallback, then `~/.docker`). It expects three files: `key.pem`, `cert.pem`, and `ca.pem`.
+</Note>
+
+## DateTime Features
+
+Enable typed timestamp support in Docker event and log responses. Choose **one** of the two crates — they are mutually exclusive.
+
+| Feature | Description |
+|---------|-------------|
+| `chrono` | Timestamp fields use [Chrono](https://github.com/chronotope/chrono) `DateTime` types. |
+| `time` | Timestamp fields use [Time 0.3](https://github.com/time-rs/time) `OffsetDateTime` types. |
+
+<Warning>
+  `chrono` and `time` cannot be enabled simultaneously. Pick the one that matches what the rest of your project already uses.
+</Warning>
+
+<CodeGroup>
+
+```toml Chrono
+[dependencies]
+bollard = { version = "*", features = ["chrono"] }
+```
+
+```toml Time 0.3
+[dependencies]
+bollard = { version = "*", features = ["time"] }
+```
+
+</CodeGroup>
+
+## BuildKit Features
+
+Enable advanced image building through [BuildKit](https://github.com/moby/buildkit).
+
+| Feature | Description |
+|---------|-------------|
+| `buildkit` | Full BuildKit support. Pulls in `buildkit_providerless` plus the `ssl` (ring) crypto provider. |
+| `buildkit_providerless` | BuildKit support without a bundled crypto provider. Pair with `ssl_providerless` and a manual `CryptoProvider::install_default()` call. |
+
+<Warning>
+  BuildKit requires timestamp handling. You **must** also enable either `chrono` or `time` alongside any BuildKit feature.
+</Warning>
+
+<CodeGroup>
+
+```toml BuildKit with Chrono (recommended)
+[dependencies]
+bollard = { version = "*", features = ["buildkit", "chrono"] }
+```
+
+```toml BuildKit with Time
+[dependencies]
+bollard = { version = "*", features = ["buildkit", "time"] }
+```
+
+```toml BuildKit, provider-less
+[dependencies]
+bollard = { version = "*", features = ["buildkit_providerless", "chrono"] }
+```
+
+</CodeGroup>
+
+## WebSocket Features
+
+| Feature | Description |
+|---------|-------------|
+| `websocket` | Enables `Docker::attach_container_websocket` via [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite). |
+
+```toml
+[dependencies]
+bollard = { version = "*", features = ["websocket"] }
+```
+
+## Development Features
+
+| Feature | Description |
+|---------|-------------|
+| `json_data_content` | Attaches the raw JSON payload to deserialization errors, making it easier to diagnose unexpected API responses. |
+
+<Note>
+  `json_data_content` increases memory usage on error paths because it clones the full response body. Enable it during development or debugging, but consider leaving it off in production builds.
+</Note>
+
+```toml
+[dependencies]
+bollard = { version = "*", features = ["json_data_content"] }
+```
+
+## Feature Compatibility Matrix
+
+<CardGroup cols={2}>
+  <Card title="Mutually Exclusive" icon="triangle-exclamation">
+    - `chrono` and `time` — pick one datetime library
+    - `ssl` and `aws-lc-rs` — pick one crypto provider
+  </Card>
+  <Card title="Required Combinations" icon="link">
+    - `buildkit` or `buildkit_providerless` requires `chrono` **or** `time`
+    - `buildkit` already implies `ssl`; for provider-less, add `ssl_providerless`
+  </Card>
+</CardGroup>

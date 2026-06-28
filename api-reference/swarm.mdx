@@ -1,0 +1,242 @@
+---
+title: "Swarm API Reference for Bollard"
+sidebarTitle: "Swarm"
+description: "Reference for Bollard Swarm methods: init_swarm, inspect_swarm, join_swarm, leave_swarm, and update_swarm for managing Docker Swarm clusters."
+---
+
+Bollard exposes the full Docker Swarm management surface through the `Docker` client. These methods allow you to initialise new clusters, join existing ones, inspect cluster state, and update swarm-wide configuration. All methods are `async` and return `Result<T, bollard::errors::Error>`.
+
+<Note>
+Swarm mode must be active on the Docker daemon for most swarm operations to succeed. Use `init_swarm` to bootstrap a new single-node cluster, or `join_swarm` to add a node to an existing one.
+</Note>
+
+---
+
+## `init_swarm`
+
+Initialise a new Docker Swarm cluster on the current daemon. On success the daemon becomes the first manager node and returns the node ID as a `String`.
+
+```rust
+pub async fn init_swarm(
+    &self,
+    config: SwarmInitRequest,
+) -> Result<String, Error>
+```
+
+### Key fields — `SwarmInitRequest`
+
+| Field | Type | Description |
+|---|---|---|
+| `advertise_addr` | `Option<String>` | Address advertised to other swarm members, e.g. `"192.168.1.1"` or `"eth0:2377"`. |
+| `listen_addr` | `Option<String>` | Socket to listen on for inter-manager traffic, e.g. `"0.0.0.0:2377"`. |
+| `force_new_cluster` | `Option<bool>` | Force-create a new cluster from a single-node state even if data exists. |
+| `spec` | `Option<SwarmSpec>` | Optional swarm-wide configuration (RAFT, dispatcher, CA, etc.). |
+
+### Returns
+
+`Result<String, Error>` — the node ID of the newly initialised manager node.
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::models::SwarmInitRequest;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let config = SwarmInitRequest {
+        advertise_addr: Some("192.168.1.1".to_string()),
+        listen_addr: Some("0.0.0.0:2377".to_string()),
+        force_new_cluster: Some(false),
+        ..Default::default()
+    };
+
+    let node_id = docker.init_swarm(config).await?;
+    println!("Swarm initialised. Manager node ID: {node_id}");
+    Ok(())
+}
+```
+
+---
+
+## `inspect_swarm`
+
+Retrieve the current swarm configuration and status, including RAFT metadata, join tokens, and the active `SwarmSpec`.
+
+```rust
+pub async fn inspect_swarm(&self) -> Result<Swarm, Error>
+```
+
+### Returns
+
+`Result<Swarm, Error>` — a [`Swarm`](https://docs.rs/bollard/latest/bollard/models/struct.Swarm.html) model containing `id`, `version`, `spec`, `join_tokens`, and RAFT info.
+
+### Example
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let swarm = docker.inspect_swarm().await?;
+    println!("Swarm ID: {:?}", swarm.id);
+    println!("Spec: {:#?}", swarm.spec);
+    Ok(())
+}
+```
+
+---
+
+## `join_swarm`
+
+Join an existing Docker Swarm cluster as either a manager or worker node. The role is determined by the `join_token` provided.
+
+```rust
+pub async fn join_swarm(
+    &self,
+    config: SwarmJoinRequest,
+) -> Result<(), Error>
+```
+
+### Key fields — `SwarmJoinRequest`
+
+| Field | Type | Description |
+|---|---|---|
+| `remote_addrs` | `Option<Vec<String>>` | Addresses of existing manager nodes to join through. |
+| `join_token` | `Option<String>` | Secret token obtained from `inspect_swarm`. Use the manager or worker token to control the joining role. |
+| `listen_addr` | `Option<String>` | Address this node will listen on for swarm traffic. |
+| `advertise_addr` | `Option<String>` | Address advertised to the rest of the swarm. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::models::SwarmJoinRequest;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let config = SwarmJoinRequest {
+        remote_addrs: Some(vec!["192.168.1.1:2377".to_string()]),
+        join_token: Some("SWMTKN-1-xxxxxxxxxxxxx".to_string()),
+        advertise_addr: Some("192.168.1.2".to_string()),
+        ..Default::default()
+    };
+
+    docker.join_swarm(config).await?;
+    println!("Successfully joined swarm");
+    Ok(())
+}
+```
+
+---
+
+## `leave_swarm`
+
+Instruct the daemon to leave the swarm. By default this fails if the node is still a manager; pass `force: true` to override.
+
+```rust
+pub async fn leave_swarm(
+    &self,
+    options: Option<LeaveSwarmOptions>,
+) -> Result<(), Error>
+```
+
+### Options — `LeaveSwarmOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.force(bool)` | `bool` | Force leave even if the node is the last manager. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LeaveSwarmOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = LeaveSwarmOptionsBuilder::default()
+        .force(true)
+        .build();
+
+    docker.leave_swarm(Some(options)).await?;
+    println!("Left swarm");
+    Ok(())
+}
+```
+
+<Warning>
+Forcing a manager to leave without demoting it first may leave the swarm in an unrecoverable state if it is the only manager.
+</Warning>
+
+---
+
+## `update_swarm`
+
+Update the swarm-wide configuration. You must supply the current version index (from `inspect_swarm`) to prevent lost-update races.
+
+```rust
+pub async fn update_swarm(
+    &self,
+    swarm_spec: SwarmSpec,
+    options: UpdateSwarmOptions,
+) -> Result<(), Error>
+```
+
+### Options — `UpdateSwarmOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.version(i64)` | `i64` | **Required.** Current version index from `swarm.version.index`. |
+| `.rotate_manager_token(bool)` | `bool` | Rotate the manager join token. |
+| `.rotate_worker_token(bool)` | `bool` | Rotate the worker join token. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateSwarmOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    // Always fetch the current spec before updating
+    let swarm = docker.inspect_swarm().await?;
+    let version = swarm.version.unwrap().index.unwrap();
+    let spec = swarm.spec.unwrap();
+
+    let options = UpdateSwarmOptionsBuilder::default()
+        .version(version as i64)
+        .rotate_worker_token(true)
+        .build();
+
+    docker.update_swarm(spec, options).await?;
+    println!("Swarm updated and worker token rotated");
+    Ok(())
+}
+```
+
+<Tip>
+Always read the current `SwarmSpec` with `inspect_swarm` immediately before calling `update_swarm`. Modify the fields you need, then pass the whole spec back — this avoids accidentally overwriting settings you didn't intend to change.
+</Tip>

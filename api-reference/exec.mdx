@@ -1,0 +1,390 @@
+---
+title: "Exec API Reference for Bollard"
+sidebarTitle: "Exec"
+description: "Reference for Bollard exec methods: create_exec, start_exec, inspect_exec, and resize_exec for running commands inside containers."
+---
+
+The exec API lets you run arbitrary commands inside a running container. The workflow is always: **create** an exec instance → **start** it → optionally **inspect** or **resize** it.
+
+All methods are on the `Docker` struct. The `ExecConfig` struct lives in `bollard::models`; the helper `CreateExecOptions` and `StartExecOptions` types live in `bollard::exec`.
+
+## Types
+
+### `CreateExecOptions<T>`
+
+A convenience wrapper around `bollard::models::ExecConfig`. It is generic over `T: Into<String> + Serialize`, so you can use `&str` or `String` for all string fields.
+
+```rust
+pub struct CreateExecOptions<T>
+where
+    T: Into<String> + serde::ser::Serialize,
+{
+    pub attach_stdin:   Option<bool>,
+    pub attach_stdout:  Option<bool>,
+    pub attach_stderr:  Option<bool>,
+    pub tty:            Option<bool>,
+    pub detach_keys:    Option<T>,
+    pub env:            Option<Vec<T>>,
+    pub cmd:            Option<Vec<T>>,
+    pub privileged:     Option<bool>,
+    pub user:           Option<T>,
+    pub working_dir:    Option<T>,
+}
+```
+
+It implements `Into<ExecConfig>` so it can be passed directly to `create_exec`. Alternatively, construct `bollard::models::ExecConfig` directly.
+
+### `StartExecOptions`
+
+```rust
+pub struct StartExecOptions {
+    pub detach:          bool,
+    pub tty:             bool,
+    pub output_capacity: Option<usize>,
+}
+```
+
+When `detach: true` the exec runs in the background and `start_exec` returns `StartExecResults::Detached` immediately. When `detach: false` (the default) the call upgrades the connection and returns `StartExecResults::Attached`.
+
+### `StartExecResults`
+
+```rust
+pub enum StartExecResults {
+    Attached {
+        output: Pin<Box<dyn Stream<Item = Result<LogOutput, Error>> + Send>>,
+        input:  Pin<Box<dyn AsyncWrite + Send>>,
+    },
+    Detached,
+}
+```
+
+`Attached` provides a `Stream` of `LogOutput` items and an `AsyncWrite` handle for sending data to the command's stdin.
+
+### `LogOutput`
+
+```rust
+pub enum LogOutput {
+    StdErr  { message: Bytes },
+    StdOut  { message: Bytes },
+    StdIn   { message: Bytes },
+    Console { message: Bytes },
+}
+```
+
+Implements `Display` (UTF-8 lossy decode), `AsRef<[u8]>`, and provides `into_bytes() -> Bytes`. Use `Display` or `into_bytes()` to extract the content.
+
+### `ResizeExecOptions`
+
+```rust
+pub struct ResizeExecOptions {
+    pub height: u16,  // serialized as "h"
+    pub width:  u16,  // serialized as "w"
+}
+```
+
+Implements `Into<crate::query_parameters::ResizeExecOptions>`.
+
+---
+
+## Methods
+
+### `create_exec`
+
+```rust
+pub async fn create_exec(
+    &self,
+    container_name: &str,
+    config: impl Into<ExecConfig>,
+) -> Result<CreateExecResults, Error>
+```
+
+Registers a new exec instance inside a running container. Does **not** run the command — call `start_exec` next.
+
+**Arguments:**
+- `container_name` — Name or ID of a running container.
+- `config` — Either a `CreateExecOptions<T>` or a `bollard::models::ExecConfig`.
+
+**`ExecConfig` key fields** (`bollard::models::ExecConfig`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `attach_stdin` | `Option<bool>` | Attach to the command's stdin. |
+| `attach_stdout` | `Option<bool>` | Attach to the command's stdout. |
+| `attach_stderr` | `Option<bool>` | Attach to the command's stderr. |
+| `tty` | `Option<bool>` | Allocate a pseudo-TTY. |
+| `cmd` | `Option<Vec<String>>` | Command to run as an array (e.g. `["ps", "-ef"]`). |
+| `env` | `Option<Vec<String>>` | Extra environment variables (`["KEY=value", …]`). |
+| `working_dir` | `Option<String>` | Working directory inside the container. |
+| `user` | `Option<String>` | User/group to run as (`"user"`, `"user:group"`, `"uid"`, `"uid:gid"`). |
+| `privileged` | `Option<bool>` | Run with extended privileges. |
+| `detach_keys` | `Option<String>` | Key sequence for detaching (e.g. `"ctrl-c"`). |
+
+**Returns:** `CreateExecResults` — contains `id: String` (the exec instance ID to pass to `start_exec`).
+
+```rust
+use bollard::Docker;
+use bollard::exec::CreateExecOptions;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = CreateExecOptions {
+    cmd: Some(vec!["ps", "-ef"]),
+    attach_stdout: Some(true),
+    attach_stderr: Some(true),
+    ..Default::default()
+};
+
+let exec = docker.create_exec("my-container", config).await.unwrap();
+println!("Exec ID: {}", exec.id);
+```
+
+---
+
+### `start_exec`
+
+```rust
+pub async fn start_exec(
+    &self,
+    exec_id: &str,
+    config: Option<StartExecOptions>,
+) -> Result<StartExecResults, Error>
+```
+
+Starts a previously created exec instance.
+
+- When `config` is `None` or `detach: false`, the call upgrades the HTTP connection and streams output as `StartExecResults::Attached`.
+- When `detach: true`, the exec runs in the background and `StartExecResults::Detached` is returned immediately.
+
+**Arguments:**
+- `exec_id` — The `id` returned by `create_exec`.
+- `config` — Optional `StartExecOptions`. Pass `None` for attached mode with defaults.
+
+**Returns:** `StartExecResults`
+
+```rust
+use bollard::Docker;
+use bollard::exec::{CreateExecOptions, StartExecOptions};
+use futures_util::StreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = CreateExecOptions {
+    cmd: Some(vec!["ls", "-la", "/"]),
+    attach_stdout: Some(true),
+    attach_stderr: Some(true),
+    ..Default::default()
+};
+
+let exec = docker.create_exec("my-container", config).await.unwrap();
+
+match docker.start_exec(&exec.id, None::<StartExecOptions>).await.unwrap() {
+    bollard::exec::StartExecResults::Attached { mut output, .. } => {
+        while let Some(item) = output.next().await {
+            match item {
+                Ok(log) => print!("{log}"),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+    }
+    bollard::exec::StartExecResults::Detached => {
+        println!("Command started in background");
+    }
+}
+```
+
+---
+
+### `inspect_exec`
+
+```rust
+pub async fn inspect_exec(&self, exec_id: &str) -> Result<ExecInspectResponse, Error>
+```
+
+Returns low-level information about an exec instance. Useful for checking whether the command has finished and what its exit code was.
+
+**Returns:** `bollard::models::ExecInspectResponse`
+
+Key fields of `ExecInspectResponse`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `Option<String>` | Exec instance ID. |
+| `running` | `Option<bool>` | Whether the exec is still running. |
+| `exit_code` | `Option<i64>` | Exit code of the process (available once `running` is `false`). |
+| `pid` | `Option<i64>` | PID of the exec process inside the container. |
+| `process_config` | `Option<ProcessConfig>` | Command and arguments as configured. |
+
+```rust
+let info = docker.inspect_exec(&exec.id).await.unwrap();
+println!("Running:   {:?}", info.running);
+println!("Exit code: {:?}", info.exit_code);
+```
+
+---
+
+### `resize_exec`
+
+```rust
+pub async fn resize_exec(
+    &self,
+    exec_id: &str,
+    options: impl Into<crate::query_parameters::ResizeExecOptions>,
+) -> Result<(), Error>
+```
+
+Resizes the TTY session used by an exec instance. Only works if `tty: true` was set in `create_exec` and the exec was started in attached mode.
+
+**Options:** `bollard::exec::ResizeExecOptions` (or `ResizeExecOptionsBuilder` from `bollard::query_parameters`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `height` | `u16` | New height in rows. |
+| `width` | `u16` | New width in columns. |
+
+**Returns:** `()`
+
+```rust
+use bollard::exec::ResizeExecOptions;
+
+docker.resize_exec(&exec.id, ResizeExecOptions { height: 40, width: 120 }).await.unwrap();
+```
+
+---
+
+## Full Exec Example
+
+<CodeGroup>
+
+```rust Run Command and Collect Output
+use bollard::Docker;
+use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
+use futures_util::TryStreamExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // Step 1: Create the exec instance
+    let exec = docker
+        .create_exec(
+            "my-container",
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(vec!["sh", "-c", "echo hello && echo world >&2"]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Step 2: Start in attached mode
+    if let StartExecResults::Attached { output, .. } =
+        docker.start_exec(&exec.id, None::<StartExecOptions>).await.unwrap()
+    {
+        // Collect all output lines
+        let lines: Vec<_> = output
+            .map_ok(|log| log.to_string())
+            .try_collect()
+            .await
+            .unwrap();
+        println!("{}", lines.join(""));
+    }
+
+    // Step 3: Check exit code
+    let info = docker.inspect_exec(&exec.id).await.unwrap();
+    println!("Exit code: {:?}", info.exit_code);
+}
+```
+
+```rust Run Command in Background (Detach)
+use bollard::Docker;
+use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let exec = docker
+        .create_exec(
+            "my-container",
+            CreateExecOptions {
+                cmd: Some(vec!["touch", "/tmp/hello"]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let result = docker
+        .start_exec(
+            &exec.id,
+            Some(StartExecOptions {
+                detach: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(result, StartExecResults::Detached));
+    println!("Command dispatched in background");
+}
+```
+
+```rust Interactive TTY Exec with Resize
+use bollard::Docker;
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let exec = docker
+        .create_exec(
+            "my-container",
+            CreateExecOptions {
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(true),
+                cmd: Some(vec!["sh"]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Resize before (or after) starting
+    docker
+        .resize_exec(&exec.id, ResizeExecOptions { height: 40, width: 120 })
+        .await
+        .unwrap();
+
+    if let StartExecResults::Attached { mut output, mut input } =
+        docker.start_exec(&exec.id, None::<StartExecOptions>).await.unwrap()
+    {
+        // Send a command to the shell
+        input.write_all(b"ls /\n").await.unwrap();
+
+        // Read a few lines of output
+        for _ in 0..5 {
+            if let Some(Ok(log)) = output.next().await {
+                print!("{log}");
+            }
+        }
+    }
+}
+```
+
+</CodeGroup>
+
+<Note>
+The `output_capacity` field of `StartExecOptions` controls the internal buffer size for the `FramedRead` decoder. The default is `8 * 1024` bytes. Increase it when executing commands that produce very long single lines of output.
+</Note>
+
+<Tip>
+After `start_exec` completes with `Attached`, call `inspect_exec` to retrieve the exit code. The process may have already finished by the time the stream closes, so `running` will be `false` and `exit_code` will be set.
+</Tip>

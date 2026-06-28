@@ -1,0 +1,156 @@
+---
+title: "Tasks API Reference for Bollard"
+sidebarTitle: "Tasks"
+description: "Reference for Bollard task methods: list_tasks, inspect_task, and task_logs for monitoring Docker Swarm task execution."
+---
+
+A Docker Swarm task is a single container instance scheduled as part of a service — the atomic unit of swarm scheduling. Tasks are created and destroyed by the swarm scheduler; you cannot directly create tasks, but you can list them, inspect their state, and stream their logs. All methods are `async` (except the streaming `task_logs`) and return `Result<T, bollard::errors::Error>`.
+
+<Note>
+Swarm mode must be enabled and the daemon must be a manager node to access task information.
+</Note>
+
+---
+
+## `list_tasks`
+
+Return all tasks visible to the swarm manager, with optional filtering.
+
+```rust
+pub async fn list_tasks(
+    &self,
+    options: Option<ListTasksOptions>,
+) -> Result<Vec<Task>, Error>
+```
+
+### Options — `ListTasksOptionsBuilder`
+
+| Builder method | Description |
+|---|---|
+| `.filters(&HashMap<&str, Vec<&str>>)` | Filter by `desired-state` (`running` \| `shutdown` \| `accepted`), `id`, `label`, `name`, `node`, or `service`. |
+
+### Returns
+
+`Result<Vec<Task>, Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListTasksOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let mut filters = HashMap::new();
+    filters.insert("service", vec!["web"]);
+    filters.insert("desired-state", vec!["running"]);
+
+    let options = ListTasksOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let tasks = docker.list_tasks(Some(options)).await?;
+    for task in &tasks {
+        println!("Task {:?} — status: {:?}", task.id, task.status);
+    }
+    Ok(())
+}
+```
+
+---
+
+## `inspect_task`
+
+Fetch full details for a single task by its ID.
+
+```rust
+pub async fn inspect_task(
+    &self,
+    task_id: &str,
+) -> Result<Task, Error>
+```
+
+### Returns
+
+`Result<Task, Error>` — a [`Task`](https://docs.rs/bollard/latest/bollard/models/struct.Task.html) model containing `id`, `version`, `created_at`, `updated_at`, `spec`, `status` (including `state` and `message`), `node_id`, and `service_id`.
+
+### Example
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let task = docker.inspect_task("abc123def456").await?;
+    println!("Node ID: {:?}", task.node_id);
+    println!("State: {:?}", task.status.as_ref().and_then(|s| s.state.as_ref()));
+    Ok(())
+}
+```
+
+---
+
+## `task_logs`
+
+Stream `stdout` and/or `stderr` log output from a specific task. Returns a `Stream` of `LogOutput` items, allowing incremental processing of potentially large or live log feeds.
+
+```rust
+pub fn task_logs(
+    &self,
+    task_id: &str,
+    options: Option<impl Into<LogsOptions>>,
+) -> impl Stream<Item = Result<LogOutput, Error>>
+```
+
+### Options — `LogsOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.stdout(bool)` | `bool` | Include stdout output. |
+| `.stderr(bool)` | `bool` | Include stderr output. |
+| `.follow(bool)` | `bool` | Keep the stream open and deliver new lines as they appear. |
+| `.timestamps(bool)` | `bool` | Prefix each log line with an RFC 3339 timestamp. |
+| `.since(i64)` | `i64` | Show only logs since this Unix timestamp. |
+| `.tail(&str)` | `&str` | Return only the last N lines, e.g. `"100"` or `"all"`. |
+| `.details(bool)` | `bool` | Include extra details provided to logs. |
+
+### Returns
+
+`impl Stream<Item = Result<LogOutput, Error>>`
+
+Each `LogOutput` variant is one of `StdOut`, `StdErr`, or `Console` and implements `Display` to produce the log line text.
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LogsOptionsBuilder;
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .timestamps(true)
+        .tail("100")
+        .build();
+
+    let mut log_stream = docker.task_logs("abc123def456", Some(options));
+    while let Some(chunk) = log_stream.try_next().await? {
+        print!("{}", chunk);
+    }
+    Ok(())
+}
+```
+
+<Tip>
+Use `follow(true)` combined with `tail("0")` to attach to a running task's live output without replaying historical lines. Combine with a timeout or cancellation token to avoid blocking indefinitely.
+</Tip>

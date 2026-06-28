@@ -1,0 +1,215 @@
+---
+title: "Nodes API Reference for Bollard"
+sidebarTitle: "Nodes"
+description: "Reference for Bollard node methods: list, inspect, update, and delete nodes in a Docker Swarm cluster."
+---
+
+Nodes are Engine instances participating in a Docker Swarm. Bollard exposes full node management through the `Docker` client, allowing you to list, inspect, update availability/role, and delete nodes. All methods are `async` and return `Result<T, bollard::errors::Error>`.
+
+<Note>
+Swarm mode must be enabled and the client must connect to a **manager** node for all node API calls.
+</Note>
+
+---
+
+## `list_nodes`
+
+Retrieve all nodes visible to the swarm manager, with optional filtering.
+
+```rust
+pub async fn list_nodes(
+    &self,
+    options: Option<ListNodesOptions>,
+) -> Result<Vec<Node>, Error>
+```
+
+### Options — `ListNodesOptionsBuilder`
+
+| Builder method | Description |
+|---|---|
+| `.filters(&HashMap<&str, Vec<&str>>)` | Filter by `id`, `label`, `membership` (`accepted` \| `pending`), `name`, or `role` (`manager` \| `worker`). |
+
+### Returns
+
+`Result<Vec<Node>, Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListNodesOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let mut filters = HashMap::new();
+    filters.insert("role", vec!["manager"]);
+
+    let options = ListNodesOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let nodes = docker.list_nodes(Some(options)).await?;
+    for node in &nodes {
+        println!("{:?}", node.id);
+    }
+    Ok(())
+}
+```
+
+---
+
+## `inspect_node`
+
+Fetch detailed information about a single node by its ID or name.
+
+```rust
+pub async fn inspect_node(
+    &self,
+    node_name: &str,
+) -> Result<Node, Error>
+```
+
+### Returns
+
+`Result<Node, Error>` — a [`Node`](https://docs.rs/bollard/latest/bollard/models/struct.Node.html) model containing `id`, `version`, `created_at`, `updated_at`, `spec`, `description`, and `status`.
+
+### Example
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let node = docker.inspect_node("my-node-id").await?;
+    println!("Hostname: {:?}", node.description
+        .as_ref()
+        .and_then(|d| d.hostname.as_ref()));
+    println!("Status: {:?}", node.status);
+    Ok(())
+}
+```
+
+---
+
+## `delete_node`
+
+Remove a node from the swarm. By default this only succeeds for nodes in a `down` state; pass `force: true` to remove an active node.
+
+```rust
+pub async fn delete_node(
+    &self,
+    node_name: &str,
+    options: Option<DeleteNodeOptions>,
+) -> Result<(), Error>
+```
+
+### Options — `DeleteNodeOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.force(bool)` | `bool` | Force-remove the node even if it is still active. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::DeleteNodeOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = DeleteNodeOptionsBuilder::default()
+        .force(true)
+        .build();
+
+    docker.delete_node("my-node-id", Some(options)).await?;
+    println!("Node removed");
+    Ok(())
+}
+```
+
+<Warning>
+Force-deleting a manager node without first demoting it may reduce manager quorum. Always demote managers with `update_node` before removing them.
+</Warning>
+
+---
+
+## `update_node`
+
+Change a node's role or availability. You must supply the current version index to prevent lost-update races.
+
+```rust
+pub async fn update_node(
+    &self,
+    node_id: &str,
+    spec: NodeSpec,
+    options: UpdateNodeOptions,
+) -> Result<(), Error>
+```
+
+### Options — `UpdateNodeOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.version(u64)` | `u64` | **Required.** Current version index from `inspect_node`. |
+
+### Key `NodeSpec` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `Option<String>` | Human-readable label for the node. |
+| `role` | `Option<NodeSpecRoleEnum>` | `MANAGER` or `WORKER`. |
+| `availability` | `Option<NodeSpecAvailabilityEnum>` | `ACTIVE`, `PAUSE`, or `DRAIN`. |
+| `labels` | `Option<HashMap<String, String>>` | Arbitrary key/value labels for scheduling constraints. |
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateNodeOptionsBuilder;
+use bollard::models::{NodeSpec, NodeSpecAvailabilityEnum, NodeSpecRoleEnum};
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let node_id = "my-node-id";
+
+    // Always fetch current version before updating
+    let current = docker.inspect_node(node_id).await?;
+    let version = current.version.unwrap().index.unwrap();
+
+    let spec = NodeSpec {
+        role: Some(NodeSpecRoleEnum::WORKER),
+        availability: Some(NodeSpecAvailabilityEnum::DRAIN),
+        name: Some("draining-worker".to_string()),
+        ..Default::default()
+    };
+
+    let options = UpdateNodeOptionsBuilder::default()
+        .version(version)
+        .build();
+
+    docker.update_node(node_id, spec, options).await?;
+    println!("Node drained");
+    Ok(())
+}
+```
+
+<Tip>
+Set `availability` to `DRAIN` before removing a worker node. This gracefully reschedules all running tasks to other nodes before the delete.
+</Tip>

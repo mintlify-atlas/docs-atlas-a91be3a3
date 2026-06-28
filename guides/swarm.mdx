@@ -1,0 +1,709 @@
+---
+title: "Docker Swarm Orchestration with Bollard"
+sidebarTitle: "Swarm"
+description: "Manage Docker Swarm clusters, services, nodes, tasks, secrets, and configs using Bollard's async Swarm API."
+---
+
+Docker Swarm mode turns a group of Docker hosts into a single, fault-tolerant cluster. Bollard provides a fully asynchronous API covering every aspect of Swarm orchestration — from initialising the cluster and deploying replicated services, to managing nodes, rotating secrets, and streaming task logs. All methods are available directly on the `Docker` client struct and return `Future`s or `Stream`s that integrate naturally with Tokio.
+
+<Note>
+All Swarm API endpoints require the Docker daemon to be running in Swarm mode. Call `init_swarm` or run `docker swarm init` before using any of the APIs described below.
+</Note>
+
+---
+
+## Swarm Lifecycle
+
+<CardGroup cols={2}>
+  <Card title="init_swarm" icon="play">
+    Initialise a new single-node Swarm and become the first manager.
+  </Card>
+  <Card title="join_swarm" icon="link">
+    Join an existing Swarm as either a manager or worker node.
+  </Card>
+  <Card title="inspect_swarm" icon="magnifying-glass">
+    Return the current Swarm configuration and metadata.
+  </Card>
+  <Card title="leave_swarm" icon="arrow-right-from-bracket">
+    Remove this node from the Swarm (force-remove a manager with `force: true`).
+  </Card>
+</CardGroup>
+
+### Initialise a Swarm
+
+```rust
+use bollard::Docker;
+use bollard::models::SwarmInitRequest;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let config = SwarmInitRequest {
+        // Address advertised to other nodes for API access
+        advertise_addr: Some("192.168.1.10".to_string()),
+        // Address and port the manager listens on for intra-swarm traffic
+        listen_addr: Some("0.0.0.0:2377".to_string()),
+        ..Default::default()
+    };
+
+    let node_id = docker.init_swarm(config).await.unwrap();
+    println!("Swarm initialised, node ID: {}", node_id);
+}
+```
+
+### Inspect a Swarm
+
+`inspect_swarm` returns a [`Swarm`](https://docs.rs/bollard/latest/bollard/models/struct.Swarm.html) struct containing the current specification, join tokens, and version information.
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let swarm = docker.inspect_swarm().await.unwrap();
+    println!("Swarm ID: {:?}", swarm.id);
+    println!("Manager version: {:?}", swarm.version);
+}
+```
+
+### Join a Swarm
+
+```rust
+use bollard::Docker;
+use bollard::models::SwarmJoinRequest;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let config = SwarmJoinRequest {
+        advertise_addr: Some("192.168.1.11".to_string()),
+        // Obtain the token from `inspect_swarm` on the manager
+        join_token: Some("SWMTKN-1-...".to_string()),
+        // Address of one or more manager nodes
+        remote_addrs: Some(vec!["192.168.1.10:2377".to_string()]),
+        ..Default::default()
+    };
+
+    docker.join_swarm(config).await.unwrap();
+}
+```
+
+### Leave a Swarm
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LeaveSwarmOptionsBuilder;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // force: true is required to remove a manager node
+    let options = LeaveSwarmOptionsBuilder::default()
+        .force(true)
+        .build();
+
+    docker.leave_swarm(Some(options)).await.unwrap();
+}
+```
+
+### Update a Swarm
+
+Update requires the current version index obtained from `inspect_swarm`:
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateSwarmOptionsBuilder;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let swarm = docker.inspect_swarm().await.unwrap();
+    let version = swarm.version.unwrap().index.unwrap();
+    let spec = swarm.spec.unwrap();
+
+    let options = UpdateSwarmOptionsBuilder::default()
+        .version(version as i64)
+        .build();
+
+    docker.update_swarm(spec, options).await.unwrap();
+}
+```
+
+---
+
+## Services
+
+A service is the definition of tasks to execute on manager or worker nodes. It specifies the container image, replica count, update policy, and more.
+
+### List Services
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListServicesOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    // Filter by scheduling mode
+    filters.insert("mode", vec!["replicated"]);
+
+    let options = ListServicesOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let services = docker.list_services(Some(options)).await.unwrap();
+    for service in services {
+        println!("Service: {:?}", service.spec.and_then(|s| s.name));
+    }
+}
+```
+
+### Create a Service
+
+Use `ServiceSpec` from `bollard::service` to describe the desired state. The `task_template` field holds the `ContainerSpec` (image, commands, environment, mounts), while `mode` controls replica count or global scheduling.
+
+```rust
+use bollard::Docker;
+use bollard::service::{
+    ServiceSpec,
+    ServiceSpecMode,
+    ServiceSpecModeReplicated,
+    TaskSpec,
+    TaskSpecContainerSpec,
+};
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let service = ServiceSpec {
+        name: Some(String::from("my-web-service")),
+        mode: Some(ServiceSpecMode {
+            replicated: Some(ServiceSpecModeReplicated {
+                replicas: Some(3),
+            }),
+            ..Default::default()
+        }),
+        task_template: Some(TaskSpec {
+            container_spec: Some(TaskSpecContainerSpec {
+                image: Some(String::from("nginx:alpine")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Optional: pass registry credentials for private images
+    let credentials = None;
+
+    let response = docker.create_service(service, credentials).await.unwrap();
+    println!("Created service ID: {:?}", response.id);
+}
+```
+
+### Inspect a Service
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::InspectServiceOptionsBuilder;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = InspectServiceOptionsBuilder::default()
+        .insert_defaults(true)
+        .build();
+
+    let service = docker
+        .inspect_service("my-web-service", Some(options))
+        .await
+        .unwrap();
+
+    println!("Service version: {:?}", service.version);
+}
+```
+
+### Update a Service
+
+Updating a service requires the current version index. Scale down to zero replicas here as an example:
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateServiceOptionsBuilder;
+use bollard::service::{
+    ServiceSpec,
+    ServiceSpecMode,
+    ServiceSpecModeReplicated,
+    TaskSpec,
+    TaskSpecContainerSpec,
+};
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let service_name = "my-web-service";
+
+    // Fetch current version before updating
+    let current_version = docker
+        .inspect_service(service_name, None)
+        .await
+        .unwrap()
+        .version
+        .unwrap()
+        .index
+        .unwrap();
+
+    let updated_spec = ServiceSpec {
+        mode: Some(ServiceSpecMode {
+            replicated: Some(ServiceSpecModeReplicated {
+                replicas: Some(5),
+            }),
+            ..Default::default()
+        }),
+        task_template: Some(TaskSpec {
+            container_spec: Some(TaskSpecContainerSpec {
+                image: Some(String::from("nginx:1.27")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let options = UpdateServiceOptionsBuilder::default()
+        .version(current_version as i32)
+        .build();
+
+    docker
+        .update_service(service_name, updated_spec, options, None)
+        .await
+        .unwrap();
+}
+```
+
+### Delete a Service
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    docker.delete_service("my-web-service").await.unwrap();
+}
+```
+
+---
+
+## Nodes
+
+Nodes are Docker Engine instances participating in the Swarm. Manager nodes host the control plane; worker nodes execute tasks.
+
+### List Nodes
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListNodesOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    filters.insert("node.label", vec!["my-node-label"]);
+
+    let options = ListNodesOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let nodes = docker.list_nodes(Some(options)).await.unwrap();
+    for node in nodes {
+        println!("Node: {:?}", node.id);
+    }
+}
+```
+
+### Inspect a Node
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let node = docker.inspect_node("my-node-id").await.unwrap();
+    println!("Node status: {:?}", node.status);
+}
+```
+
+### Update a Node
+
+Common use cases: promoting a worker to manager, draining a node for maintenance.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateNodeOptionsBuilder;
+use bollard::models::{NodeSpec, NodeSpecAvailabilityEnum, NodeSpecRoleEnum};
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // Drain the node so no new tasks are scheduled on it
+    let spec = NodeSpec {
+        availability: Some(NodeSpecAvailabilityEnum::DRAIN),
+        name: Some("worker-01".to_string()),
+        role: Some(NodeSpecRoleEnum::WORKER),
+        ..Default::default()
+    };
+
+    // Version must match the current node version
+    let options = UpdateNodeOptionsBuilder::default()
+        .version(2)
+        .build();
+
+    docker.update_node("my-node-id", spec, options).await.unwrap();
+}
+```
+
+### Delete a Node
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::DeleteNodeOptionsBuilder;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = DeleteNodeOptionsBuilder::default()
+        .force(true)
+        .build();
+
+    docker.delete_node("my-node-id", Some(options)).await.unwrap();
+}
+```
+
+---
+
+## Tasks
+
+A task is a running container scheduled by the Swarm onto a specific node. Tasks are the atomic unit of scheduling — one task per replica. Tasks are read-only through the API; to change task count, update the parent service.
+
+### List Tasks
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListTasksOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    filters.insert("label", vec!["my-task-label"]);
+
+    let options = ListTasksOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let tasks = docker.list_tasks(Some(options)).await.unwrap();
+    for task in tasks {
+        println!("Task ID: {:?}, State: {:?}", task.id, task.status);
+    }
+}
+```
+
+### Inspect a Task
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let task = docker.inspect_task("my-task-id").await.unwrap();
+    println!("Task node: {:?}", task.node_id);
+}
+```
+
+### Stream Task Logs
+
+`task_logs` returns an async `Stream` of `LogOutput` items, allowing you to tail a task's stdout and stderr in real time.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LogsOptionsBuilder;
+use futures_util::stream::StreamExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .follow(true)
+        .build();
+
+    let mut log_stream = docker.task_logs("my-task-id", Some(options));
+
+    while let Some(log_result) = log_stream.next().await {
+        match log_result {
+            Ok(log) => print!("{}", log),
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    }
+}
+```
+
+---
+
+## Secrets
+
+Secrets store sensitive data (TLS certificates, passwords, API keys) and make them available to service tasks inside containers at `/run/secrets/<name>`. Secret data is encrypted at rest in the Swarm Raft log.
+
+<Warning>
+Secret data must be base64-encoded before being passed to `create_secret`. The `data` field on `SecretSpec` expects a standard base64 string.
+</Warning>
+
+### Create a Secret
+
+```rust
+use bollard::Docker;
+use bollard::models::SecretSpec;
+use base64::Engine;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let secret_spec = SecretSpec {
+        name: Some(String::from("db-password")),
+        data: Some(
+            base64::engine::general_purpose::STANDARD.encode("super-secret-password")
+        ),
+        ..Default::default()
+    };
+
+    let response = docker.create_secret(secret_spec).await.unwrap();
+    println!("Secret ID: {:?}", response.id);
+}
+```
+
+### List Secrets
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListSecretsOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    filters.insert("label", vec!["secret-label=label-value"]);
+
+    let options = ListSecretsOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let secrets = docker.list_secrets(Some(options)).await.unwrap();
+    for secret in secrets {
+        println!("Secret: {:?}", secret.spec.and_then(|s| s.name));
+    }
+}
+```
+
+### Inspect and Update a Secret
+
+<Note>
+The `data` field cannot be changed via `update_secret` — only metadata such as labels can be updated. To rotate secret data you must create a new secret and update any services referencing the old one.
+</Note>
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateSecretOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let existing = docker.inspect_secret("db-password").await.unwrap();
+    let version = existing.version.unwrap().index.unwrap();
+    let mut spec = existing.spec.unwrap();
+
+    // Update labels (data cannot be changed)
+    let mut labels = HashMap::new();
+    labels.insert(String::from("rotated-at"), String::from("2024-01-15"));
+    spec.labels = Some(labels);
+
+    let options = UpdateSecretOptionsBuilder::default()
+        .version(version as i64)
+        .build();
+
+    docker.update_secret("db-password", spec, options).await.unwrap();
+}
+```
+
+### Delete a Secret
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    docker.delete_secret("db-password").await.unwrap();
+}
+```
+
+---
+
+## Configs
+
+Configs are similar to secrets but store non-sensitive configuration data (nginx config files, application settings). Config data is not encrypted at rest and is visible in plain text via the API.
+
+### Create a Config
+
+```rust
+use bollard::Docker;
+use bollard::config::ConfigSpec;
+use base64::Engine;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let config_spec = ConfigSpec {
+        name: Some(String::from("nginx-config")),
+        data: Some(
+            base64::engine::general_purpose::STANDARD
+                .encode("server { listen 80; root /var/www/html; }")
+        ),
+        ..Default::default()
+    };
+
+    let response = docker.create_config(config_spec).await.unwrap();
+    println!("Config ID: {:?}", response.id);
+}
+```
+
+### List, Inspect, Update, and Delete
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::{ListConfigsOptionsBuilder, UpdateConfigOptionsBuilder};
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // List configs with a label filter
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("label".into(), vec!["config-label=label-value".into()]);
+    let options = ListConfigsOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+    let configs = docker.list_configs(Some(options)).await.unwrap();
+
+    // Inspect by name or ID
+    let config = docker.inspect_config("nginx-config").await.unwrap();
+
+    // Update metadata (labels only — data is immutable)
+    let version = config.version.unwrap().index.unwrap();
+    let mut spec = config.spec.unwrap();
+    let mut labels = HashMap::new();
+    labels.insert(String::from("env"), String::from("production"));
+    spec.labels = Some(labels);
+    let update_opts = UpdateConfigOptionsBuilder::default()
+        .version(version as i64)
+        .build();
+    docker
+        .update_config("nginx-config", spec, update_opts)
+        .await
+        .unwrap();
+
+    // Delete
+    docker.delete_config("nginx-config").await.unwrap();
+}
+```
+
+---
+
+## Complete Example: Init Swarm and Deploy a Service
+
+The snippet below ties everything together — it initialises a single-node Swarm and immediately deploys a replicated nginx service.
+
+```rust
+use bollard::Docker;
+use bollard::models::SwarmInitRequest;
+use bollard::service::{
+    ServiceSpec,
+    ServiceSpecMode,
+    ServiceSpecModeReplicated,
+    TaskSpec,
+    TaskSpecContainerSpec,
+};
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // 1. Initialise the Swarm
+    let init_config = SwarmInitRequest {
+        advertise_addr: Some("127.0.0.1".to_string()),
+        listen_addr: Some("0.0.0.0:2377".to_string()),
+        ..Default::default()
+    };
+    let node_id = docker.init_swarm(init_config).await.unwrap();
+    println!("Node ID: {}", node_id);
+
+    // 2. Deploy a replicated nginx service
+    let service_spec = ServiceSpec {
+        name: Some(String::from("web")),
+        mode: Some(ServiceSpecMode {
+            replicated: Some(ServiceSpecModeReplicated {
+                replicas: Some(2),
+            }),
+            ..Default::default()
+        }),
+        task_template: Some(TaskSpec {
+            container_spec: Some(TaskSpecContainerSpec {
+                image: Some(String::from("nginx:alpine")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let response = docker.create_service(service_spec, None).await.unwrap();
+    println!("Service created: {:?}", response.id);
+
+    // 3. List all running services
+    let services = docker.list_services(None).await.unwrap();
+    println!("Running services: {}", services.len());
+}
+```
+
+<Tip>
+When running integration tests against a live daemon, use the `test_swarm` Cargo feature flag to gate swarm-specific tests: `cargo test --features test_swarm`.
+</Tip>

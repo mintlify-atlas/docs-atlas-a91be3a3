@@ -1,0 +1,193 @@
+---
+title: "Docker Client: Connection Methods and Configuration"
+sidebarTitle: "Docker Client"
+description: "The Docker struct is the main entry point for all Bollard API calls. Reference for all connect_with_* constructors, timeout configuration, and custom transports."
+---
+
+The `Docker` struct is the core client for every Bollard API call. Internally it wraps its transport in an `Arc`, so it is **cheaply cloneable** — cloning a `Docker` handle shares the underlying connection pool and version state with the original. All constructor methods return `Result<Docker, Error>`.
+
+## Connection Methods
+
+### Local / Auto-detect
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_defaults()` | `pipe` | Resolves the host using Docker CLI precedence: `DOCKER_HOST` env → `DOCKER_CONTEXT` env → `currentContext` in `~/.docker/config.json` → platform default. |
+| `Docker::connect_with_local_defaults()` | `pipe` | Delegates to `connect_with_unix_defaults` on Unix or `connect_with_named_pipe_defaults` on Windows. |
+| `Docker::connect_with_local(addr, timeout, version)` | `pipe` | Parameterized wrapper — Unix socket on Unix, named pipe on Windows. |
+
+### Unix Socket
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_unix_defaults()` | `pipe` (Unix) | Connects to the socket resolved via Docker CLI precedence; falls back to `/var/run/docker.sock`. |
+| `Docker::connect_with_unix(addr, timeout, version)` | `pipe` (Unix) | Connects to an explicit Unix socket path. Returns `SocketNotFoundError` if the socket does not exist. |
+| `Docker::connect_with_socket_defaults()` | `pipe` | Platform-agnostic: Unix socket on Unix, named pipe on Windows. |
+| `Docker::connect_with_socket(path, timeout, version)` | `pipe` | Parameterized platform-agnostic version. |
+
+### Windows Named Pipe
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_named_pipe_defaults()` | `pipe` (Windows) | Connects to the pipe resolved via Docker CLI precedence; falls back to `//./pipe/docker_engine`. |
+| `Docker::connect_with_named_pipe(addr, timeout, version)` | `pipe` (Windows) | Connects to an explicit named pipe path. |
+
+### HTTP / TCP
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_http_defaults()` | `http` | Reads `DOCKER_HOST`; defaults to `tcp://localhost:2375`. Timeout 2 minutes. |
+| `Docker::connect_with_http(addr, timeout, version)` | `http` | Parameterized HTTP/TCP connection. |
+
+### TLS / SSL (Rustls)
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_ssl_defaults()` | `ssl_providerless` | Reads `DOCKER_HOST` and `DOCKER_CERT_PATH`; expects `key.pem`, `cert.pem`, `ca.pem`. |
+| `Docker::connect_with_ssl(addr, ssl_key, ssl_cert, ssl_ca, timeout, version)` | `ssl_providerless` | Parameterized TLS connection with explicit certificate paths. |
+
+<Warning>
+`connect_with_ssl` and `connect_with_ssl_defaults` require a Rustls `CryptoProvider` to be installed before calling. Either enable the `ssl` (aws-lc-rs) or `ssl_ring` feature, or call `rustls::crypto::CryptoProvider::install_default()` manually when using `ssl_providerless`.
+</Warning>
+
+### SSH
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_ssh_defaults()` | `ssh` | Reads `DOCKER_HOST`; defaults to `ssh://localhost`. |
+| `Docker::connect_with_ssh(addr, timeout, version, keypair_path)` | `ssh` | Parameterized SSH tunnel. Pass `Some(path)` to use a custom keypair. |
+
+### Podman
+
+| Method | Feature flag | Description |
+|--------|-------------|-------------|
+| `Docker::connect_with_podman_defaults()` | `pipe` (Unix) | Probes `$DOCKER_HOST` → `$XDG_RUNTIME_DIR/podman/podman.sock` → `/run/user/$UID/podman/podman.sock` → `/run/podman/podman.sock` → `/var/run/docker.sock`. |
+
+### Context-Aware
+
+| Method | Description |
+|--------|-------------|
+| `Docker::connect_with_host(host)` | Dispatches based on the URI scheme (`unix://`, `npipe://`, `tcp://`, `http://`, `https://`, `ssh://`). |
+| `Docker::connect_with_context(name)` | Connects to a named Docker context from `~/.docker/contexts/meta`. The name `"default"` uses the platform default. |
+| `Docker::connect_with_current_context()` | Uses `DOCKER_CONTEXT` env → `currentContext` in `config.json` → platform default. `DOCKER_HOST` is intentionally ignored. |
+
+### Custom Transport
+
+| Method | Description |
+|--------|-------------|
+| `Docker::connect_with_custom_transport(transport, client_addr, timeout, version)` | Accepts any type implementing `CustomTransport` (or any `Fn(BollardRequest) -> Future<…>` closure). |
+
+## Configuration Methods
+
+| Method | Description |
+|--------|-------------|
+| `docker.with_timeout(duration) -> Self` | Builder-style timeout setter. Returns `Self` for chaining. |
+| `docker.timeout() -> Duration` | Returns the current request timeout. Default is 2 minutes. |
+| `docker.set_timeout(&mut self, duration)` | Mutably sets the request timeout. |
+| `docker.client_version() -> ClientVersion` | Returns the currently negotiated `ClientVersion`. |
+| `docker.negotiate_version() -> Result<Self, Error>` | Queries `/version` and downgrades the client version if the server reports a lower version. |
+| `docker.with_request_modifier(F) -> Self` | Registers a callback `F: Fn(BollardRequest) -> BollardRequest` that runs before every request. Useful for injecting headers. |
+
+## `ClientVersion` Struct
+
+```rust
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct ClientVersion {
+    pub major_version: usize,
+    pub minor_version: usize,
+}
+```
+
+Implements `Display` as `"{major}.{minor}"` and `PartialOrd` for version comparisons.
+
+## `API_DEFAULT_VERSION` Constant
+
+```rust
+pub const API_DEFAULT_VERSION: &ClientVersion = &ClientVersion {
+    major_version: 1,
+    minor_version: 53,
+};
+```
+
+Pass this constant as the `client_version` argument to any parameterized constructor unless you need to target a specific daemon version.
+
+## Cloning
+
+`Docker` implements `Clone` cheaply: the internal `Arc<Transport>`, version `Arc`, and optional request modifier are all reference-counted. Cloning is the idiomatic way to share a single connection across Tokio tasks.
+
+```rust
+let docker = Docker::connect_with_unix_defaults().unwrap();
+let docker2 = docker.clone(); // shares the same connection pool
+```
+
+## Custom Transport Example
+
+<CodeGroup>
+
+```rust Custom HTTP Proxy Transport
+use bollard::{API_DEFAULT_VERSION, Docker, BollardRequest};
+use futures_util::FutureExt;
+
+#[tokio::main]
+async fn main() {
+    let http_connector = hyper_util::client::legacy::connect::HttpConnector::new();
+
+    let mut client_builder =
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new());
+    client_builder.pool_max_idle_per_host(0);
+
+    let client = std::sync::Arc::new(client_builder.build(http_connector));
+
+    let docker = Docker::connect_with_custom_transport(
+        move |req: BollardRequest| {
+            let client = std::sync::Arc::clone(&client);
+            Box::pin(async move {
+                client
+                    .request(req)
+                    .await
+                    .map_err(bollard::errors::Error::from)
+            })
+        },
+        Some("http://my-custom-docker-server:2735"),
+        120,
+        API_DEFAULT_VERSION,
+    )
+    .unwrap();
+
+    docker.ping().await.unwrap();
+}
+```
+
+```rust Request Modifier (inject User-Agent)
+use bollard::Docker;
+use http::header::{HeaderValue, USER_AGENT};
+
+let docker = Docker::connect_with_socket_defaults()
+    .unwrap()
+    .with_request_modifier(|mut req| {
+        req.headers_mut()
+            .insert(USER_AGENT, HeaderValue::from_static("my-app/1.0"));
+        req
+    });
+```
+
+```rust Version Negotiation
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_http_defaults()
+        .unwrap()
+        .negotiate_version()
+        .await
+        .unwrap();
+
+    println!("Negotiated version: {}", docker.client_version());
+}
+```
+
+</CodeGroup>
+
+<Note>
+The `timeout` applies to every individual HTTP request including streaming calls. For long-running streams such as `events` or `stats`, set a generous timeout or use `set_timeout(Duration::MAX)`.
+</Note>

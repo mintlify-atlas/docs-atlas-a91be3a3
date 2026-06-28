@@ -1,0 +1,226 @@
+---
+title: "Connect Bollard to a Local Docker Daemon"
+sidebarTitle: "Local Socket"
+description: "Use connect_with_local_defaults or connect_with_socket to connect Bollard to Docker via Unix socket on Linux/macOS or named pipe on Windows."
+---
+
+Bollard provides first-class support for connecting to a locally running Docker daemon. On Linux and macOS it communicates over a Unix domain socket; on Windows it uses a Named Pipe. The helper methods below abstract away the platform difference so most code can be written once and run anywhere.
+
+## Auto-detect the Best Local Connection
+
+`Docker::connect_with_local_defaults()` is the recommended starting point for local connections. On Unix it delegates to `connect_with_unix_defaults`; on Windows it delegates to `connect_with_named_pipe_defaults`. Both variants respect the Docker CLI precedence for host resolution (`DOCKER_HOST` env var → `DOCKER_CONTEXT` env var → `currentContext` in `~/.docker/config.json` → platform default).
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_local_defaults().unwrap();
+```
+
+Use `Docker::connect_with_local` when you need to supply an explicit socket path, timeout, or API version:
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+// Unix
+let docker = Docker::connect_with_local(
+    "unix:///var/run/docker.sock",
+    120,
+    API_DEFAULT_VERSION,
+).unwrap();
+```
+
+### Function signatures
+
+```rust
+// Delegates to connect_with_unix_defaults() on Unix,
+// connect_with_named_pipe_defaults() on Windows.
+pub fn connect_with_local_defaults() -> Result<Docker, Error>
+
+// Delegates to connect_with_unix() on Unix,
+// connect_with_named_pipe() on Windows.
+pub fn connect_with_local(
+    addr: &str,
+    timeout: u64,
+    client_version: &ClientVersion,
+) -> Result<Docker, Error>
+```
+
+<Note>
+  Both methods require the **`pipe`** feature flag, which is enabled by default. If you have disabled default features, add `features = ["pipe"]` to your `Cargo.toml` dependency.
+</Note>
+
+---
+
+## Unix Socket (Linux / macOS)
+
+### `connect_with_socket_defaults`
+
+Connects to the standard Unix socket path `/var/run/docker.sock` (or `//./pipe/docker_engine` on Windows). This is a cross-platform convenience wrapper around `connect_with_unix` / `connect_with_named_pipe`.
+
+```rust
+use bollard::Docker;
+
+#[cfg(unix)]
+let docker = Docker::connect_with_socket_defaults().unwrap();
+```
+
+### `connect_with_socket`
+
+Parameterised variant — supply any Unix socket path, a timeout in seconds, and an API `ClientVersion`.
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+let docker = Docker::connect_with_socket(
+    "/var/run/docker.sock",
+    120,
+    API_DEFAULT_VERSION,
+).unwrap();
+```
+
+#### Function signatures
+
+```rust
+pub fn connect_with_socket_defaults() -> Result<Docker, Error>
+
+pub fn connect_with_socket(
+    path: &str,
+    timeout: u64,
+    client_version: &ClientVersion,
+) -> Result<Docker, Error>
+```
+
+### `connect_with_unix_defaults` / `connect_with_unix`
+
+Lower-level Unix-only methods. `connect_with_unix_defaults` resolves the host using the Docker CLI precedence chain before falling back to `DEFAULT_SOCKET`.
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+// Defaults — respects DOCKER_HOST / context / config.json
+let docker = Docker::connect_with_unix_defaults().unwrap();
+
+// Explicit path
+let docker = Docker::connect_with_unix(
+    "/var/run/docker.sock",
+    120,
+    API_DEFAULT_VERSION,
+).unwrap();
+```
+
+#### Function signatures
+
+```rust
+pub fn connect_with_unix_defaults() -> Result<Docker, Error>
+
+pub fn connect_with_unix(
+    path: &str,
+    timeout: u64,
+    client_version: &ClientVersion,
+) -> Result<Docker, Error>
+```
+
+---
+
+## Windows Named Pipe
+
+### `connect_with_named_pipe_defaults`
+
+Connects to the standard Windows named pipe `//./pipe/docker_engine`. Respects the Docker CLI host-resolution precedence; falls back to `DEFAULT_NAMED_PIPE` when the resolved host is not an `npipe://` address.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_named_pipe_defaults().unwrap();
+```
+
+### `connect_with_named_pipe`
+
+Parameterised variant for custom pipe paths.
+
+```rust
+use bollard::{API_DEFAULT_VERSION, Docker};
+
+let docker = Docker::connect_with_named_pipe(
+    "//./pipe/docker_engine",
+    120,
+    API_DEFAULT_VERSION,
+).unwrap();
+```
+
+#### Function signatures
+
+```rust
+pub fn connect_with_named_pipe_defaults() -> Result<Docker, Error>
+
+pub fn connect_with_named_pipe(
+    path: &str,
+    timeout: u64,
+    client_version: &ClientVersion,
+) -> Result<Docker, Error>
+```
+
+---
+
+## Constants
+
+The following public constants define the default addresses used by the connection helpers:
+
+| Constant | Platform | Value |
+|---|---|---|
+| `DEFAULT_SOCKET` | Unix | `"unix:///var/run/docker.sock"` |
+| `DEFAULT_NAMED_PIPE` | Windows | `"npipe:////./pipe/docker_engine"` |
+| `DEFAULT_DOCKER_HOST` | Unix | alias of `DEFAULT_SOCKET` |
+| `DEFAULT_DOCKER_HOST` | Windows | alias of `DEFAULT_NAMED_PIPE` |
+
+```rust
+use bollard::{DEFAULT_SOCKET, DEFAULT_DOCKER_HOST};
+
+// On Unix:
+// DEFAULT_SOCKET        == "unix:///var/run/docker.sock"
+// DEFAULT_DOCKER_HOST   == "unix:///var/run/docker.sock"
+```
+
+---
+
+## Feature Flags
+
+<CardGroup cols={2}>
+  <Card title="pipe (default)" icon="plug">
+    Enables Unix socket and Windows named pipe transports. Required by all connection methods on this page. Included in the default feature set — no extra configuration needed for most projects.
+  </Card>
+  <Card title="Minimal binary" icon="minimize">
+    To reduce binary size, disable default features and re-enable only what you need:
+    ```toml
+    bollard = { version = "*", default-features = false, features = ["pipe"] }
+    ```
+  </Card>
+</CardGroup>
+
+---
+
+## Complete Example
+
+<Steps>
+  <Step title="Add Bollard to Cargo.toml">
+    ```toml
+    [dependencies]
+    bollard = "*"          # pipe + http enabled by default
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Connect and verify">
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_local_defaults()
+            .expect("Failed to connect to local Docker daemon");
+
+        let version = docker.version().await.unwrap();
+        println!("Docker version: {:?}", version.version);
+    }
+    ```
+  </Step>
+</Steps>

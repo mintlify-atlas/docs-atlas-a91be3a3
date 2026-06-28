@@ -1,0 +1,266 @@
+---
+title: "Volumes API Reference for Bollard"
+sidebarTitle: "Volumes"
+description: "Reference for Bollard volume methods: list, create, inspect, remove, and prune Docker volumes."
+---
+
+The volume API manages persistent storage that can be mounted into containers. All methods are on the `Docker` struct. Options builders live in `bollard::query_parameters`; model structs live in `bollard::models`.
+
+## Methods
+
+### `list_volumes`
+
+```rust
+pub async fn list_volumes(
+    &self,
+    options: Option<impl Into<ListVolumesOptions>>,
+) -> Result<VolumeListResponse, Error>
+```
+
+Returns a list of volumes on the daemon, optionally filtered.
+
+**Options:** `ListVolumesOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `dangling` (`"1"`/`"0"`), `driver`, `label`, `name`. |
+
+**Returns:** `VolumeListResponse` — contains `volumes: Option<Vec<Volume>>` and `warnings: Option<Vec<String>>`.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListVolumesOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("dangling", vec!["1"]);
+
+let options = ListVolumesOptionsBuilder::default()
+    .filters(&filters)
+    .build();
+
+let result = docker.list_volumes(Some(options)).await.unwrap();
+if let Some(volumes) = result.volumes {
+    for vol in &volumes {
+        println!("Volume: {} driver={}", vol.name, vol.driver);
+    }
+}
+```
+
+---
+
+### `create_volume`
+
+```rust
+pub async fn create_volume(
+    &self,
+    config: impl Into<VolumeCreateRequest>,
+) -> Result<Volume, Error>
+```
+
+Creates a new named volume.
+
+**Config:** `bollard::models::VolumeCreateRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `Option<String>` | Volume name. Docker generates a random name if omitted. |
+| `driver` | `Option<String>` | Volume driver (e.g. `"local"`). Defaults to `"local"`. |
+| `driver_opts` | `Option<HashMap<String, String>>` | Driver-specific options (e.g. mount type, device, o flags for `local`). |
+| `labels` | `Option<HashMap<String, String>>` | Labels to apply to the volume. |
+
+**Returns:** `Volume` — contains `name`, `driver`, `mountpoint`, `created_at`, `labels`, `scope`, `options`, and `status`.
+
+```rust
+use bollard::Docker;
+use bollard::models::VolumeCreateRequest;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = VolumeCreateRequest {
+    name: Some(String::from("my-data-volume")),
+    ..Default::default()
+};
+
+let volume = docker.create_volume(config).await.unwrap();
+println!("Volume mountpoint: {}", volume.mountpoint);
+```
+
+---
+
+### `inspect_volume`
+
+```rust
+pub async fn inspect_volume(&self, volume_name: &str) -> Result<Volume, Error>
+```
+
+Returns detailed information about a volume.
+
+**Returns:** `Volume`
+
+```rust
+let volume = docker.inspect_volume("my-data-volume").await.unwrap();
+println!("Driver: {}", volume.driver);
+println!("Created: {:?}", volume.created_at);
+```
+
+---
+
+### `remove_volume`
+
+```rust
+pub async fn remove_volume(
+    &self,
+    volume_name: &str,
+    options: Option<impl Into<RemoveVolumeOptions>>,
+) -> Result<(), Error>
+```
+
+Removes a volume. The volume must not be in use by any container.
+
+**Options:** `RemoveVolumeOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `force` | `bool` | Force removal of the volume. |
+
+**Returns:** `()`
+
+```rust
+use bollard::query_parameters::RemoveVolumeOptionsBuilder;
+
+let options = RemoveVolumeOptionsBuilder::default().force(true).build();
+docker.remove_volume("my-data-volume", Some(options)).await.unwrap();
+```
+
+---
+
+### `prune_volumes`
+
+```rust
+pub async fn prune_volumes(
+    &self,
+    options: Option<impl Into<PruneVolumesOptions>>,
+) -> Result<VolumePruneResponse, Error>
+```
+
+Removes all unused volumes (volumes not referenced by any container).
+
+**Options:** `PruneVolumesOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `label`, `all`. |
+
+**Returns:** `VolumePruneResponse` — contains `volumes_deleted: Option<Vec<String>>` and `space_reclaimed: Option<i64>`.
+
+---
+
+## Volume Lifecycle Example
+
+<CodeGroup>
+
+```rust Create, Inspect, and Remove
+use bollard::Docker;
+use bollard::models::VolumeCreateRequest;
+use bollard::query_parameters::RemoveVolumeOptionsBuilder;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // 1. Create a named volume
+    let config = VolumeCreateRequest {
+        name: Some(String::from("app-data")),
+        labels: Some(
+            [("env".to_string(), "production".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    let vol = docker.create_volume(config).await.unwrap();
+    println!("Created: {} at {}", vol.name, vol.mountpoint);
+
+    // 2. Inspect it
+    let info = docker.inspect_volume("app-data").await.unwrap();
+    println!("Labels: {:?}", info.labels);
+
+    // 3. Remove it (force)
+    let opts = RemoveVolumeOptionsBuilder::default().force(true).build();
+    docker.remove_volume("app-data", Some(opts)).await.unwrap();
+    println!("Volume removed");
+}
+```
+
+```rust Mount a Volume into a Container
+use bollard::Docker;
+use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountTypeEnum};
+use bollard::query_parameters::CreateContainerOptionsBuilder;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = CreateContainerOptionsBuilder::default()
+        .name("app-with-volume")
+        .build();
+
+    let host_config = HostConfig {
+        mounts: Some(vec![Mount {
+            target: Some(String::from("/data")),
+            source: Some(String::from("app-data")),
+            typ: Some(MountTypeEnum::VOLUME),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+
+    let config = ContainerCreateBody {
+        image: Some("alpine:latest".to_string()),
+        host_config: Some(host_config),
+        ..Default::default()
+    };
+
+    let result = docker.create_container(Some(options), config).await.unwrap();
+    println!("Container ID: {}", result.id);
+}
+```
+
+```rust Prune Unused Volumes
+use bollard::Docker;
+use bollard::query_parameters::PruneVolumesOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    filters.insert("label", vec!["env=staging"]);
+
+    let options = PruneVolumesOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let result = docker.prune_volumes(Some(options)).await.unwrap();
+    if let Some(deleted) = result.volumes_deleted {
+        println!("Deleted {} volumes", deleted.len());
+    }
+    if let Some(reclaimed) = result.space_reclaimed {
+        println!("Reclaimed {} bytes", reclaimed);
+    }
+}
+```
+
+</CodeGroup>
+
+<Warning>
+Removing a volume deletes all data stored in it permanently. There is no recovery path. Always verify that no containers are using the volume before removal.
+</Warning>
+
+<Note>
+When using named volumes with the `local` driver, you can pass driver options such as `type`, `device`, and `o` (mount options) in `driver_opts` to create volumes backed by NFS, tmpfs, or other filesystem types.
+</Note>

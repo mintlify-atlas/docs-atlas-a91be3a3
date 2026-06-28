@@ -1,0 +1,355 @@
+---
+title: "Managing Docker Images with Bollard"
+sidebarTitle: "Images"
+description: "Pull, build, tag, push, inspect, and export Docker images using Bollard's async image API with streaming build output."
+---
+
+Bollard provides a full set of async image management methods on the `Docker` struct. Pull, build, inspect, tag, push, and export operations are all covered. Build and pull operations return a `Stream` of progress events that you can consume incrementally.
+
+## Pulling an Image
+
+`create_image` pulls (or imports) an image from a registry. It returns a `Stream<Item = Result<CreateImageInfo, Error>>` so you can observe download progress layer by layer.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::CreateImageOptionsBuilder;
+use futures_util::TryStreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+docker
+    .create_image(
+        Some(
+            CreateImageOptionsBuilder::default()
+                .from_image("alpine:3")
+                .build(),
+        ),
+        None,
+        None,
+    )
+    .try_collect::<Vec<_>>()
+    .await?;
+```
+
+<Note>
+  The third argument to `create_image` is an optional `DockerCredentials`
+  struct for pulling from private registries.
+</Note>
+
+## Listing Images
+
+`list_images` returns `Vec<ImageSummary>`. Filter by `dangling`, `label`, or other keys.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListImagesOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("dangling", vec!["true"]);
+
+let images = docker
+    .list_images(Some(
+        ListImagesOptionsBuilder::default()
+            .all(true)
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+for img in &images {
+    println!("{:?} — {}", img.repo_tags, img.size);
+}
+```
+
+## Inspecting an Image
+
+`inspect_image` returns `ImageInspect` with full metadata: architecture, OS, layers, exposed ports, and more.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let info = docker.inspect_image("alpine:3").await?;
+println!("Architecture: {:?}", info.architecture);
+println!("OS: {:?}", info.os);
+println!("Layers: {:?}", info.root_fs.and_then(|r| r.layers));
+```
+
+## Building an Image
+
+`build_image` streams `BuildInfo` events. Provide a `BuildImageOptions`, optional registry credentials, and a tar archive body.
+
+<CodeGroup>
+```rust Tarball
+use bollard::Docker;
+use bollard::query_parameters::BuildImageOptionsBuilder;
+use bollard::body_full;
+use futures_util::TryStreamExt;
+use std::fs::File;
+use std::io::Read;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = BuildImageOptionsBuilder::default()
+    .dockerfile("Dockerfile")
+    .t("my-image:latest")
+    .rm(true)
+    .build();
+
+let mut file = File::open("tarball.tar.gz").unwrap();
+let mut contents = Vec::new();
+file.read_to_end(&mut contents).unwrap();
+
+let build_stream = docker.build_image(options, None, Some(body_full(contents.into())));
+
+build_stream
+    .try_for_each(|info| async move {
+        if let Some(stream) = info.stream {
+            print!("{stream}");
+        }
+        Ok(())
+    })
+    .await?;
+```
+
+```rust Stream
+use bollard::Docker;
+use bollard::query_parameters::BuildImageOptionsBuilder;
+use bollard::body_stream;
+use futures_util::TryStreamExt;
+use std::fs::File;
+use std::io::Read;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = BuildImageOptionsBuilder::default()
+    .dockerfile("Dockerfile")
+    .t("my-image:latest")
+    .rm(true)
+    .build();
+
+// Stream the tarball directly from disk
+let mut file = File::open("tarball.tar.gz").unwrap();
+let mut contents = Vec::new();
+file.read_to_end(&mut contents).unwrap();
+let payload = Box::new(contents).leak();
+let payload = payload.chunks(32);
+let stream = futures_util::stream::iter(payload.map(bytes::Bytes::from));
+
+docker
+    .build_image(options, None, Some(body_stream(stream)))
+    .try_collect::<Vec<_>>()
+    .await?;
+```
+</CodeGroup>
+
+<Tip>
+  For advanced builds using BuildKit (multi-stage caching, secrets, SSH
+  forwarding), enable the `buildkit_providerless` feature and set
+  `version(BuilderVersion::BuilderBuildKit)` in your options. See the
+  [BuildKit guide](/guides/buildkit) for details.
+</Tip>
+
+## Tagging an Image
+
+Tag an existing image to add it to a repository under a new name or tag.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::TagImageOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+docker
+    .tag_image(
+        "my-image:latest",
+        Some(
+            TagImageOptionsBuilder::default()
+                .repo("registry.example.com/my-image")
+                .tag("v1.0.1")
+                .build(),
+        ),
+    )
+    .await?;
+```
+
+## Pushing an Image
+
+`push_image` returns a `Stream<Item = Result<PushImageInfo, Error>>`. Consume it fully to ensure the push completes.
+
+```rust
+use bollard::Docker;
+use bollard::auth::DockerCredentials;
+use bollard::query_parameters::PushImageOptionsBuilder;
+use futures_util::TryStreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let credentials = Some(DockerCredentials {
+    username: Some("myuser".to_string()),
+    password: Some("mypassword".to_string()),
+    ..Default::default()
+});
+
+docker
+    .push_image(
+        "registry.example.com/my-image",
+        Some(PushImageOptionsBuilder::default().tag("v1.0.1").build()),
+        credentials,
+    )
+    .try_collect::<Vec<_>>()
+    .await?;
+```
+
+<Warning>
+  Always drive the stream to completion with `.try_collect()` or
+  `.try_for_each()`. Dropping it early cancels the push.
+</Warning>
+
+## Exporting and Importing Images
+
+<CodeGroup>
+```rust Export single image
+use bollard::Docker;
+use futures_util::TryStreamExt;
+use tokio::io::AsyncWriteExt;
+use tokio::fs::File;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut file = File::create("alpine.tar").await?;
+let mut stream = docker.export_image("alpine:3");
+
+while let Some(chunk) = stream.try_next().await? {
+    file.write_all(&chunk).await?;
+}
+```
+
+```rust Export multiple images
+use bollard::Docker;
+use futures_util::TryStreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+// Shared layers are deduplicated in the output archive
+let _bytes: Vec<_> = docker
+    .export_images(&["alpine:3", "busybox:latest"])
+    .try_collect()
+    .await?;
+```
+
+```rust Import image
+use bollard::Docker;
+use bollard::body_full;
+use std::fs;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let contents = fs::read("alpine.tar")?;
+docker.import_image(body_full(contents.into())).await?;
+```
+</CodeGroup>
+
+## Removing an Image
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::RemoveImageOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let deleted = docker
+    .remove_image(
+        "my-image:latest",
+        Some(
+            RemoveImageOptionsBuilder::default()
+                .force(false)
+                .noprune(false)
+                .build(),
+        ),
+        None, // optional DockerCredentials
+    )
+    .await?;
+
+for d in &deleted {
+    println!("{:?}", d);
+}
+```
+
+## Pruning Unused Images
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::PruneImagesOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("until", vec!["24h"]);
+
+let result = docker
+    .prune_images(Some(
+        PruneImagesOptionsBuilder::default()
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+println!(
+    "Reclaimed: {:?} bytes",
+    result.space_reclaimed
+);
+```
+
+## Searching Docker Hub
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::SearchImagesOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+// SearchImagesOptions requires a `term` field
+let results = docker
+    .search_images(
+        bollard::query_parameters::SearchImagesOptionsBuilder::default()
+            .term("alpine")
+            .limit(5u64)
+            .build(),
+    )
+    .await?;
+
+for item in &results {
+    println!("{} — stars: {:?}", item.name.as_deref().unwrap_or("?"), item.star_count);
+}
+```
+
+## Committing a Container as an Image
+
+`commit_container` snapshots the filesystem of a running or stopped container and saves it as a new image.
+
+```rust
+use bollard::Docker;
+use bollard::models::ContainerConfig;
+use bollard::query_parameters::CommitContainerOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = CommitContainerOptionsBuilder::default()
+    .container("my-app")
+    .repo("my-snapshot")
+    .tag("v2")
+    .pause(true)
+    .build();
+
+let id = docker
+    .commit_container(options, ContainerConfig::default())
+    .await?;
+
+println!("New image ID: {:?}", id.id);
+```

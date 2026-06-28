@@ -1,0 +1,270 @@
+---
+title: "BuildKit gRPC API Reference for Bollard"
+sidebarTitle: "BuildKit"
+description: "Reference for Bollard's BuildKit gRPC integration: ImageBuildFrontendOptions, driver types, cache options, export types, and SSH/secret mounts."
+---
+
+Bollard provides a first-class BuildKit integration via a gRPC layer that communicates directly with BuildKit's control API. Unlike the classic `/build` HTTP endpoint, the BuildKit path supports advanced features: multi-platform builds, cache import/export, SSH forwarding, secret mounts, named contexts, and OCI/Docker image export.
+
+<Note>
+The BuildKit API requires the `buildkit` or `buildkit_providerless` Cargo feature flag **plus** either the `chrono` or `time` feature for OAuth authentication token handling.
+
+```toml
+# Cargo.toml
+[dependencies]
+bollard = { version = "*", features = ["buildkit_providerless", "time"] }
+```
+</Note>
+
+---
+
+## `ImageBuildFrontendOptionsBuilder`
+
+The primary builder for configuring a BuildKit solve request. Construct it via `ImageBuildFrontendOptions::builder()` or `ImageBuildFrontendOptionsBuilder::new()`, call the desired setters, then finalise with `.build()`.
+
+```rust
+use bollard::grpc::build::ImageBuildFrontendOptions;
+
+let opts = ImageBuildFrontendOptions::builder()
+    .dockerfile(std::path::Path::new("Dockerfile"))
+    .target("release")
+    .nocache(false)
+    .pull(true)
+    .buildarg("APP_VERSION", "1.0.0")
+    .label("org.opencontainers.image.source", "https://github.com/example/repo")
+    .build();
+```
+
+### Builder methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `dockerfile` | `(path: &Path) -> Self` | Path within the build context to the `Dockerfile`. Defaults to `Dockerfile` at the root. |
+| `target` | `(target: &str) -> Self` | Named build stage to stop at (multi-stage builds). |
+| `nocache` | `(nocache: bool) -> Self` | Disable layer caching entirely. |
+| `pull` | `(pull: bool) -> Self` | Attempt to pull the base image even if a local copy exists. |
+| `buildarg` | `(key: &str, value: &str) -> Self` | Inject a `--build-arg`. May be called multiple times. |
+| `label` | `(key: &str, value: &str) -> Self` | Attach an image label. May be called multiple times. |
+| `platforms` | `(value: &ImageBuildPlatform) -> Self` | Add a target platform (OS + architecture + optional variant). May be called multiple times for multi-platform builds. |
+| `force_network_mode` | `(value: &ImageBuildNetworkMode) -> Self` | Override the network mode for `RUN` steps. |
+| `extrahost` | `(value: &ImageBuildHostIp) -> Self` | Add an extra entry to `/etc/hosts` during the build. |
+| `shmsize` | `(value: u64) -> Self` | Size of `/dev/shm` in bytes (default 64 MiB). |
+| `set_secret` | `(key: &str, source: &SecretSource) -> Self` | Bind a build-time secret without persisting it into the image. See [Secret mounts](#secret-mounts). |
+| `enable_ssh` | `(value: bool) -> Self` | Forward the host SSH agent into the build. Requires `SSH_AUTH_SOCK` to be set. |
+| `named_context` | `(key: &str, value: NamedContext) -> Self` | Override a named build context (e.g. another image or a Git URL). |
+| `cacheto` | `(value: &CacheOptionsEntry) -> Self` | Export build cache to a registry or local path. |
+| `cachefrom` | `(value: &CacheOptionsEntry) -> Self` | Import build cache from a registry or local path. |
+| `build` | `() -> ImageBuildFrontendOptions` | Consume the builder and return the finalised options. |
+
+---
+
+## Driver types
+
+The driver determines how Bollard connects to BuildKit. Choose based on your environment.
+
+### `MobyDriver`
+
+Builds via the Docker daemon's built-in BuildKit (`DOCKER_BUILDKIT=1`). Uses the `/session` and `/grpc` HTTP upgrade endpoints over the existing Docker socket connection — no extra process required.
+
+```rust
+use bollard::grpc::driver::moby::Moby;
+use bollard::grpc::driver::Build;
+
+// docker is a bollard::Docker instance
+let moby = Moby::new(&docker);
+moby.docker_build("myimage:latest", opts, load_input, None, None).await?;
+```
+
+This is the simplest driver and works with any Docker installation that has BuildKit enabled (Docker 18.09+).
+
+### `DockerContainerDriver`
+
+Spawns a dedicated BuildKit container (`moby/buildkit`) inside Docker and communicates via exec stdin/stdout. Useful when you need a pinned BuildKit version or features not yet in the daemon's built-in builder.
+
+```rust
+use bollard::grpc::driver::docker_container::DockerContainer;
+```
+
+### `BuildkitdDriver`
+
+Connects directly to a standalone `buildkitd` daemon over a TCP socket. Ideal for CI environments where `buildkitd` runs as a sidecar or system service.
+
+```rust
+use bollard::grpc::driver::buildkitd::Buildkitd;
+```
+
+---
+
+## Export types — `ImageExporterEnum`
+
+After a successful build, you can export the resulting image to different targets:
+
+| Variant | Description |
+|---|---|
+| `ImageExporterEnum::OCI(ImageExporterRequest)` | Write the image as an OCI image tarball (`type=oci`). |
+| `ImageExporterEnum::Docker(ImageExporterRequest)` | Write the image as a Docker image tarball (`type=docker`). |
+
+Construct an `ImageExporterRequest` using `ImageExporterOutput::builder`:
+
+```rust
+use bollard::grpc::export::ImageExporterOutput;
+use bollard::grpc::driver::ImageExporterEnum;
+use std::path::Path;
+
+let exporter_request = ImageExporterOutput::builder("docker.io/library/my-image:latest")
+    .dest(Path::new("/tmp/my-image.tar"));
+
+let exporter = ImageExporterEnum::OCI(exporter_request);
+```
+
+### `ImageExporterOutputBuilder` methods
+
+| Method | Description |
+|---|---|
+| `compression(&ImageBuildOutputCompression)` | Compression algorithm: `Uncompressed`, `Gzip` (default), `Estargz`, or `Zstd`. |
+| `compression_level(u8)` | Compression level (algorithm-specific). |
+| `force_compression(bool)` | Force re-compression even if already compressed. |
+| `oci_mediatypes(bool)` | Use OCI media types in manifests (default: `true` for OCI, `false` for Docker). |
+| `annotation(key: &str, value: &str)` | Attach an OCI annotation to the exported manifest. |
+| `dest(path: &Path) -> ImageExporterRequest` | Finalise and set the output file path. |
+
+---
+
+## `ImageBuildLoadInput`
+
+The build context is passed as a compressed tar archive wrapped in `ImageBuildLoadInput`.
+
+```rust
+#[non_exhaustive]
+pub enum ImageBuildLoadInput {
+    Upload(Bytes),
+}
+```
+
+| Variant | Description |
+|---|---|
+| `Upload(Bytes)` | A gzip-compressed tar archive containing the build context (Dockerfile and supporting files). |
+
+### Creating a build context
+
+```rust
+use std::io::Write;
+use bollard::grpc::build::{ImageBuildFrontendOptions, ImageBuildLoadInput};
+
+let dockerfile = r#"
+FROM alpine AS builder
+RUN echo "hello" > /hello.txt
+FROM alpine
+COPY --from=builder /hello.txt /hello.txt
+ENTRYPOINT ["cat", "/hello.txt"]
+"#;
+
+// Pack the Dockerfile into a tar archive
+let mut header = tar::Header::new_gnu();
+header.set_path("Dockerfile").unwrap();
+header.set_size(dockerfile.len() as u64);
+header.set_mode(0o644);
+header.set_cksum();
+
+let mut tar_builder = tar::Builder::new(Vec::new());
+tar_builder.append(&header, dockerfile.as_bytes()).unwrap();
+let uncompressed = tar_builder.into_inner().unwrap();
+
+// Gzip-compress it
+let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+encoder.write_all(&uncompressed).unwrap();
+let compressed = encoder.finish().unwrap();
+
+let load_input = ImageBuildLoadInput::Upload(bytes::Bytes::from(compressed));
+```
+
+---
+
+## Secret mounts
+
+Secrets are passed to the build via `set_secret` on the builder. They are available inside `RUN` steps via `--mount=type=secret` and are **never persisted** in the final image layers.
+
+```rust
+use bollard::grpc::build::{ImageBuildFrontendOptions, SecretSource};
+
+let opts = ImageBuildFrontendOptions::builder()
+    // Source a secret from a file on the host
+    .set_secret("aws-creds", &SecretSource::File("/home/user/.aws/credentials".into()))
+    // Source a secret from an environment variable
+    .set_secret("api-key", &SecretSource::Env("MY_API_KEY".to_string()))
+    .build();
+```
+
+Corresponding Dockerfile instructions:
+
+```dockerfile
+RUN --mount=type=secret,id=aws-creds,target=/root/.aws/credentials \
+    aws s3 sync s3://my-bucket /app/assets
+
+RUN --mount=type=secret,id=api-key,env=MY_API_KEY \
+    curl -H "Authorization: Bearer $MY_API_KEY" https://api.example.com/data
+```
+
+---
+
+## SSH forwarding
+
+Enable SSH agent forwarding with `.enable_ssh(true)`. The host `SSH_AUTH_SOCK` environment variable must be set.
+
+```rust
+let opts = ImageBuildFrontendOptions::builder()
+    .enable_ssh(true)
+    .build();
+```
+
+```dockerfile
+RUN --mount=type=ssh git clone git@github.com:private/repo.git
+```
+
+---
+
+## Complete example — build and export
+
+```rust
+use bollard::Docker;
+use bollard::grpc::build::{ImageBuildFrontendOptions, ImageBuildLoadInput};
+use bollard::grpc::driver::moby::Moby;
+use bollard::grpc::driver::{Build, ImageExporterEnum};
+use bollard::grpc::export::ImageExporterOutput;
+use std::io::Write;
+use std::path::Path;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let dockerfile = "FROM alpine\nRUN echo hello\n";
+    let mut header = tar::Header::new_gnu();
+    header.set_path("Dockerfile").unwrap();
+    header.set_size(dockerfile.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    tar_builder.append(&header, dockerfile.as_bytes()).unwrap();
+    let uncompressed = tar_builder.into_inner().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&uncompressed).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let opts = ImageBuildFrontendOptions::builder()
+        .pull(true)
+        .build();
+
+    let load_input = ImageBuildLoadInput::Upload(bytes::Bytes::from(compressed));
+
+    let moby = Moby::new(&docker);
+    moby.docker_build("my-app:latest", opts, load_input, None, None).await?;
+
+    println!("Build complete");
+    Ok(())
+}
+```
+
+<Warning>
+BuildKit requires Docker 18.09+ with BuildKit enabled (`DOCKER_BUILDKIT=1`) or a standalone `buildkitd` instance. The `MobyDriver` will return an error if the daemon does not support the `/grpc` endpoint upgrade.
+</Warning>

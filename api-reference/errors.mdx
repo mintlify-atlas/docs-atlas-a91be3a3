@@ -1,0 +1,349 @@
+---
+title: "Error Types Reference for Bollard"
+sidebarTitle: "Errors"
+description: "Complete reference for the bollard::errors::Error enum variants returned by all Bollard API methods, with pattern matching examples."
+---
+
+Every fallible Bollard method returns `Result<T, bollard::errors::Error>`. The `Error` type is a `#[non_exhaustive]` enum derived from the [`thiserror`](https://docs.rs/thiserror) crate, so each variant implements `std::error::Error` and provides a human-readable `Display` message automatically.
+
+```rust
+use bollard::errors::Error;
+```
+
+<Note>
+The enum is marked `#[non_exhaustive]`, which means new variants may be added in future releases without a breaking change. Always include a catch-all `_ =>` arm in your match expressions.
+</Note>
+
+---
+
+## API and stream error variants
+
+These are the variants you will encounter most often during normal operation.
+
+### `DockerResponseServerError`
+
+The Docker daemon returned an HTTP error status code.
+
+```rust
+Error::DockerResponseServerError {
+    status_code: u16,
+    message: String,
+}
+```
+
+| Field | Description |
+|---|---|
+| `status_code` | HTTP status code from the daemon (e.g. `404`, `409`, `500`). |
+| `message` | The error body returned by the daemon. |
+
+**Display:** `Docker responded with status code {status_code}: {message}`
+
+---
+
+### `JsonDataError`
+
+JSON deserialization of a daemon response failed. This usually indicates an API version mismatch or an unexpected response shape.
+
+```rust
+Error::JsonDataError {
+    message: String,
+    column: usize,
+    // Only present with the `json_data_content` feature:
+    // contents: String,
+}
+```
+
+| Field | Description |
+|---|---|
+| `message` | Short excerpt of the JSON near the parse error. |
+| `column` | Character offset within the JSON where the error was detected. |
+
+**Display:** `Failed to deserialize JSON: {message}`
+
+<Tip>
+Enable the `json_data_content` Cargo feature to add a `contents: String` field that captures the full raw JSON payload, making it much easier to diagnose unexpected daemon responses:
+
+```toml
+bollard = { version = "*", features = ["json_data_content"] }
+```
+</Tip>
+
+---
+
+### `RequestTimeoutError`
+
+The request did not complete within the configured timeout duration.
+
+```rust
+Error::RequestTimeoutError
+```
+
+**Display:** `Timeout error`
+
+---
+
+### `DockerStreamError`
+
+An error message was emitted mid-stream during a streaming operation (e.g. during image build, pull, or push). The overall HTTP response was successful, but the stream payload contained an error event.
+
+```rust
+Error::DockerStreamError {
+    error: String,
+}
+```
+
+| Field | Description |
+|---|---|
+| `error` | The error string emitted within the stream payload. |
+
+**Display:** `Docker stream error: {error}`
+
+---
+
+### `DockerContainerWaitError`
+
+Returned by `wait_container` when a container exits with a non-zero status or the wait call itself encounters an error.
+
+```rust
+Error::DockerContainerWaitError {
+    error: String,
+    code: i64,
+}
+```
+
+| Field | Description |
+|---|---|
+| `error` | The error string returned from the container wait response. |
+| `code` | The exit code of the container. |
+
+**Display:** `Docker container wait error: {error}`
+
+---
+
+### `APIVersionParseError`
+
+The Docker API version string returned by the daemon could not be parsed.
+
+```rust
+Error::APIVersionParseError {}
+```
+
+**Display:** `Failed to parse API version`
+
+---
+
+### `MissingSessionBuildkitError`
+
+A BuildKit operation was attempted without a session ID.
+
+```rust
+Error::MissingSessionBuildkitError {}
+```
+
+**Display:** `Buildkit requires a unique session`
+
+---
+
+### `MissingVersionBuildkitError`
+
+A BuildKit operation was attempted without the builder version being set.
+
+```rust
+Error::MissingVersionBuildkitError {}
+```
+
+**Display:** `Buildkit requires a builder version set`
+
+---
+
+## SSL/TLS error variants
+
+These variants are only present when the `ssl_providerless` Cargo feature is enabled.
+
+### `NoHomePathError`
+
+The `DOCKER_CERT_PATH` environment variable was set but no home directory could be determined.
+
+```rust
+#[cfg(feature = "ssl_providerless")]
+Error::NoHomePathError
+```
+
+**Display:** `Could not find home directory`
+
+---
+
+### `CertPathError`
+
+A certificate file could not be opened or read.
+
+```rust
+#[cfg(feature = "ssl_providerless")]
+Error::CertPathError { path: PathBuf }
+```
+
+**Display:** `Cannot open/read certificate with path: {path}`
+
+---
+
+### `CertMultipleKeys`
+
+A certificate file contained more than one private key.
+
+```rust
+#[cfg(feature = "ssl_providerless")]
+Error::CertMultipleKeys { count: usize, path: PathBuf }
+```
+
+**Display:** `Found multiple keys ({count}), expected one: {path}`
+
+---
+
+### `CertParseError`
+
+A private key in a certificate file could not be parsed (e.g. an RSA-encrypted key).
+
+```rust
+#[cfg(feature = "ssl_providerless")]
+Error::CertParseError { path: PathBuf }
+```
+
+**Display:** `Could not parse key: {path}`
+
+---
+
+### `NoNativeCertsError`
+
+A native PKI certificate could not be parsed during TLS setup.
+
+```rust
+#[cfg(feature = "ssl_providerless")]
+Error::NoNativeCertsError { err: rustls::Error }
+```
+
+**Display:** `Could not parse a pki native cert`
+
+---
+
+### `LoadNativeCertsErrors`
+
+One or more errors occurred while loading native certificates for TLS.
+
+```rust
+#[cfg(feature = "ssl_providerless")]
+Error::LoadNativeCertsErrors { errors: Vec<rustls_native_certs::Error> }
+```
+
+**Display:** `Could not load native certs`
+
+---
+
+## Transparent / wrapped error variants
+
+These wrap underlying library errors transparently. Their `Display` output and source chain are forwarded from the inner error.
+
+| Variant | Inner type | Typical cause |
+|---|---|---|
+| `JsonSerdeError` | `serde_json::Error` | Serialization of a request body failed. |
+| `StrParseError` | `std::str::Utf8Error` | Log output or stream data contained invalid UTF-8. |
+| `IOError` | `std::io::Error` | I/O error on the socket or file system. |
+| `StrFmtError` | `std::fmt::Error` | String formatting failure. |
+| `HttpClientError` | `http::Error` | HTTP request construction failed. |
+| `HyperResponseError` | `hyper::Error` | Low-level Hyper HTTP error (connection reset, etc.). |
+| `URLEncodedError` | `serde_urlencoded::ser::Error` | Query parameter serialization failed. |
+| `URLParseError` | `url::ParseError` | A URL string could not be parsed. |
+| `InvalidURIError` | `http::uri::InvalidUri` | A URI string was malformed. |
+| `InvalidURIPartsError` | `http::uri::InvalidUriParts` | URI parts could not be assembled. |
+| `HyperLegacyError` | `hyper_util::client::legacy::Error` | Error from the legacy hyper client connector (HTTP/SSH/pipe features). |
+| `HttpHeaderToStrError` | `http::header::ToStrError` | An HTTP header value contained non-ASCII bytes. |
+| `Base64DecodeError` | `base64::DecodeError` | Base64 decoding of a header or payload failed. |
+
+---
+
+## Other variants
+
+| Variant | Description |
+|---|---|
+| `UnsupportedURISchemeError { uri: String }` | The connection URL used a scheme Bollard does not support. |
+| `SocketNotFoundError(String)` | The Docker socket file was not found at the expected path. |
+| `DockerContextNotFoundError { name: String }` | A Docker context referenced by `DOCKER_CONTEXT` or `~/.docker/config.json` does not exist on disk. |
+| `HttpHeaderNotFoundError(String)` | An expected HTTP response header was absent. |
+| `WebSocketError { err }` | A WebSocket connection failed (requires the `websocket` feature). |
+
+---
+
+## Pattern matching example
+
+```rust
+use bollard::Docker;
+use bollard::errors::Error;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    match docker.inspect_container("my-container", None).await {
+        Ok(container) => {
+            println!("Container state: {:?}", container.state);
+        }
+        Err(Error::DockerResponseServerError { status_code: 404, .. }) => {
+            eprintln!("Container not found");
+        }
+        Err(Error::DockerResponseServerError { status_code, message }) => {
+            eprintln!("Daemon error {status_code}: {message}");
+        }
+        Err(Error::RequestTimeoutError) => {
+            eprintln!("Request timed out — is the Docker daemon running?");
+        }
+        Err(Error::IOError { err }) => {
+            eprintln!("I/O error: {err}");
+        }
+        // Required: the enum is #[non_exhaustive]
+        Err(e) => {
+            eprintln!("Unexpected error: {e}");
+        }
+    }
+}
+```
+
+---
+
+## Streaming error handling
+
+For streaming operations, errors may arrive either as the `Err` variant of a stream item (`DockerStreamError`) or as an outer `Result` error. Handle both cases:
+
+```rust
+use bollard::Docker;
+use bollard::errors::Error;
+use bollard::image::CreateImageOptions;
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = CreateImageOptions {
+        from_image: "alpine",
+        tag: "latest",
+        ..Default::default()
+    };
+
+    let mut stream = docker.create_image(Some(options), None, None);
+
+    while let Some(info) = stream.try_next().await? {
+        // DockerStreamError is returned as Err by try_next
+        // Non-error progress events are returned as Ok
+        if let Some(err) = info.error {
+            eprintln!("Stream error: {err}");
+            break;
+        }
+        println!("{:?}", info.status);
+    }
+
+    Ok(())
+}
+```
+
+<Warning>
+Because `Error` is `#[non_exhaustive]`, omitting the `_ =>` catch-all arm will cause a **compile error** when new variants are added in future Bollard releases. Always include it.
+</Warning>

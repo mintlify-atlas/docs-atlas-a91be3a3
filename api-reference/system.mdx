@@ -1,0 +1,186 @@
+---
+title: "System API: Docker Daemon Info, Version, and Events"
+sidebarTitle: "System"
+description: "Reference for Bollard system methods: version, info, ping, df, events, and negotiate_version for checking daemon health and capabilities."
+---
+
+The system API methods provide access to Docker daemon metadata, health checks, disk usage reporting, and the real-time event stream. All methods are available directly on the `Docker` struct with no additional imports beyond `bollard::Docker`.
+
+## Methods
+
+### `version`
+
+```rust
+pub async fn version(&self) -> Result<SystemVersion, Error>
+```
+
+Returns the version of Docker running on the daemon along with system information such as the Go version, OS, kernel version, and API version string.
+
+**Returns:** [`SystemVersion`](https://docs.rs/bollard/latest/bollard/models/struct.SystemVersion.html)
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let version = docker.version().await.unwrap();
+    println!("Docker version: {:?}", version.version);
+    println!("API version:    {:?}", version.api_version);
+}
+```
+
+---
+
+### `info`
+
+```rust
+pub async fn info(&self) -> Result<SystemInfo, Error>
+```
+
+Returns daemon-wide information: number of containers, images, memory limits, swap limits, kernel memory, CPU count, Docker root directory, logging driver, registry config, and more.
+
+**Returns:** [`SystemInfo`](https://docs.rs/bollard/latest/bollard/models/struct.SystemInfo.html)
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let info = docker.info().await.unwrap();
+    println!("Containers running: {:?}", info.containers_running);
+    println!("Docker root dir:    {:?}", info.docker_root_dir);
+}
+```
+
+---
+
+### `ping`
+
+```rust
+pub async fn ping(&self) -> Result<String, Error>
+```
+
+A lightweight health-check endpoint (`GET /_ping`). Returns the string `"OK"` when the daemon is reachable. Use this to verify connectivity before making other API calls.
+
+**Returns:** `String` — always `"OK"` on success.
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let response = docker.ping().await.unwrap();
+    assert_eq!(response, "OK");
+    println!("Daemon is reachable.");
+}
+```
+
+---
+
+### `df`
+
+```rust
+pub async fn df(
+    &self,
+    options: Option<DataUsageOptions>,
+) -> Result<SystemDataUsageResponse, Error>
+```
+
+Returns disk usage information for containers, images, volumes, and build cache. Pass `None` for default behaviour (all resource types).
+
+**Options:** `bollard::query_parameters::DataUsageOptions`
+
+**Returns:** [`SystemDataUsageResponse`](https://docs.rs/bollard/latest/bollard/models/struct.SystemDataUsageResponse.html)
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::DataUsageOptions;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let usage = docker.df(None::<DataUsageOptions>).await.unwrap();
+
+    if let Some(images) = usage.images {
+        println!("Image count: {}", images.len());
+    }
+    if let Some(containers) = usage.containers {
+        println!("Container count: {}", containers.len());
+    }
+}
+```
+
+---
+
+### `events`
+
+```rust
+pub fn events(
+    &self,
+    options: Option<EventsOptions>,
+) -> impl Stream<Item = Result<EventMessage, Error>>
+```
+
+Streams real-time events from the Docker daemon. The returned `Stream` yields one [`EventMessage`](https://docs.rs/bollard/latest/bollard/models/struct.EventMessage.html) per daemon event. The stream stays open until the connection is dropped or an error occurs.
+
+**Options:** `bollard::query_parameters::EventsOptions` (built via `EventsOptionsBuilder`)
+
+| Builder field | Type | Description |
+|---------------|------|-------------|
+| `since` | `&str` | Show events since a timestamp or relative duration (e.g. `"1h"`). |
+| `until` | `&str` | Show events until a timestamp. |
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `type`, `event`, `image`, `container`, `label`, etc. |
+
+**Returns:** `impl Stream<Item = Result<EventMessage, Error>>`
+
+<Note>
+`events` returns a lazy `Stream`, not a `Future`. You must iterate it using `StreamExt` or `TryStreamExt`. The stream does not terminate on its own — wrap it in `tokio::time::timeout` or select it against a cancellation signal for bounded execution.
+</Note>
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::EventsOptionsBuilder;
+use futures_util::StreamExt;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let mut filters = HashMap::new();
+    filters.insert("type", vec!["container"]);
+
+    let options = EventsOptionsBuilder::default()
+        .since("1h")
+        .filters(&filters)
+        .build();
+
+    let mut stream = docker.events(Some(options));
+
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(msg) => println!("Event: {:?} {:?}", msg.typ, msg.action),
+            Err(e) => eprintln!("Error: {e}"),
+        }
+    }
+}
+```
+
+---
+
+## Error Handling
+
+All system methods return `Result<_, bollard::errors::Error>`. The most common errors are:
+
+| Error variant | Cause |
+|---------------|-------|
+| `DockerResponseServerError { status_code, message }` | The daemon returned a non-2xx HTTP status. |
+| `RequestTimeoutError` | The request exceeded the client timeout (default 2 minutes). |
+| `IOError` | Underlying socket or pipe I/O failure. |
+
+<Tip>
+Call `docker.ping().await` at application startup to surface connectivity problems early, before attempting heavier API calls.
+</Tip>

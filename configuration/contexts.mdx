@@ -1,0 +1,191 @@
+---
+title: "Docker Context Resolution in Bollard"
+sidebarTitle: "Contexts"
+description: "Bollard resolves the Docker daemon endpoint using the same precedence as the Docker CLI: DOCKER_HOST, DOCKER_CONTEXT, config.json, and platform defaults."
+---
+
+Bollard follows the same context-resolution rules as the Docker CLI. When you call a context-aware connection method, Bollard inspects environment variables and your Docker config file to discover which daemon endpoint to connect to — no manual configuration required if your CLI is already pointed at the right daemon.
+
+## Resolution Precedence
+
+Bollard evaluates the following sources in order, using the first one that is set and non-empty:
+
+<Steps>
+  <Step title="DOCKER_HOST environment variable">
+    If `DOCKER_HOST` is set to a non-empty value, it is used directly as the daemon endpoint, bypassing all context machinery.
+
+    ```bash
+    export DOCKER_HOST=tcp://remote-host:2375
+    ```
+  </Step>
+
+  <Step title="DOCKER_CONTEXT environment variable">
+    If `DOCKER_CONTEXT` names a context (e.g. `desktop-linux`), Bollard looks up that context under the Docker config directory and returns its `Endpoints.docker.Host` value.
+
+    ```bash
+    export DOCKER_CONTEXT=desktop-linux
+    ```
+  </Step>
+
+  <Step title="currentContext in ~/.docker/config.json">
+    If `DOCKER_CONTEXT` is not set, Bollard reads the `currentContext` field from `~/.docker/config.json` (or `$DOCKER_CONFIG/config.json` if the `DOCKER_CONFIG` variable is set) and performs the same context lookup.
+
+    ```json
+    {
+      "currentContext": "desktop-linux"
+    }
+    ```
+  </Step>
+
+  <Step title="Platform default">
+    If none of the above yield a host, Bollard falls back to the platform-specific default:
+    - **Unix** — `unix:///var/run/docker.sock`
+    - **Windows** — `npipe:////./pipe/docker_engine`
+  </Step>
+</Steps>
+
+<Note>
+  `DOCKER_HOST` is a **transport override**, not a context selector. Methods like `Docker::connect_with_current_context()` intentionally ignore `DOCKER_HOST` so that they respect exactly the context-selection inputs (`DOCKER_CONTEXT` and `config.json`). Use `Docker::connect_with_defaults()` if you want `DOCKER_HOST` to win over everything else.
+</Note>
+
+## Context Storage
+
+Named contexts are stored as JSON files on disk. Bollard searches for them at:
+
+```
+$DOCKER_CONFIG/contexts/meta/<hash-dir>/meta.json
+```
+
+If `DOCKER_CONFIG` is not set, the directory defaults to `~/.docker` (Linux/macOS) or `%USERPROFILE%\.docker` (Windows).
+
+Each `meta.json` file contains the context name and its endpoint:
+
+```json
+{
+  "Name": "desktop-linux",
+  "Endpoints": {
+    "docker": {
+      "Host": "unix:///home/user/.docker/desktop/docker.sock"
+    }
+  }
+}
+```
+
+Bollard iterates the `meta/` subdirectories and matches by the `Name` field — it does not recompute the SHA-256 directory hash used by the Docker CLI.
+
+<Note>
+  The context name `"default"` (or an empty string) is special — it always resolves to the platform default socket rather than looking up a stored context on disk.
+</Note>
+
+## API Methods
+
+### `Docker::connect_with_defaults()`
+
+Fully context-aware connection that respects the complete resolution precedence: `DOCKER_HOST` → `DOCKER_CONTEXT` → `currentContext` in `config.json` → platform default.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_defaults()?;
+```
+
+Use this method when you want Bollard to behave identically to the Docker CLI's host selection.
+
+### `Docker::connect_with_current_context()`
+
+Follows the Docker CLI's *context-only* selection: checks `DOCKER_CONTEXT`, then `currentContext` in `config.json`, then falls back to the platform default. `DOCKER_HOST` is **not** consulted.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_current_context()?;
+```
+
+### `Docker::connect_with_context(name)`
+
+Connects to a specific named context, ignoring all environment variables. Pass `"default"` or an empty string to connect to the platform default.
+
+```rust
+use bollard::Docker;
+
+// Connect to the "desktop-linux" context explicitly
+let docker = Docker::connect_with_context("desktop-linux")?;
+
+// "default" resolves to the platform default socket
+let docker = Docker::connect_with_context("default")?;
+```
+
+<Warning>
+  If the context name does not match any stored context, `connect_with_context()` returns `Err(Error::DockerContextNotFoundError { name })`. Always handle this error when the context name comes from user input or configuration.
+</Warning>
+
+## Code Examples
+
+<CodeGroup>
+
+```rust Auto-resolve (Docker CLI behaviour)
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Respects DOCKER_HOST > DOCKER_CONTEXT > config.json > platform default
+    let docker = Docker::connect_with_defaults()?;
+    let version = docker.version().await?;
+    println!("Connected to Docker {}", version.version.unwrap_or_default());
+    Ok(())
+}
+```
+
+```rust Current context (no DOCKER_HOST)
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Only checks DOCKER_CONTEXT and config.json — DOCKER_HOST is ignored
+    let docker = Docker::connect_with_current_context()?;
+    let info = docker.info().await?;
+    println!("OS: {}", info.operating_system.unwrap_or_default());
+    Ok(())
+}
+```
+
+```rust Named context
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect directly to a specific context by name
+    let docker = Docker::connect_with_context("remote-server")?;
+    let containers = docker.list_containers::<String>(None).await?;
+    println!("{} containers running", containers.len());
+    Ok(())
+}
+```
+
+```rust Handle missing context
+use bollard::{Docker, errors::Error};
+
+#[tokio::main]
+async fn main() {
+    match Docker::connect_with_context("staging") {
+        Ok(docker) => {
+            println!("Connected to staging context");
+            let _ = docker.ping().await;
+        }
+        Err(Error::DockerContextNotFoundError { name }) => {
+            eprintln!("Context '{}' not found — check `docker context ls`", name);
+        }
+        Err(e) => eprintln!("Connection error: {}", e),
+    }
+}
+```
+
+</CodeGroup>
+
+## Environment Variables Summary
+
+| Variable | Effect |
+|----------|--------|
+| `DOCKER_HOST` | Overrides the daemon endpoint entirely (consulted by `connect_with_defaults` only) |
+| `DOCKER_CONTEXT` | Selects a named context to look up in the config directory |
+| `DOCKER_CONFIG` | Override for the Docker config directory (default: `~/.docker`) |

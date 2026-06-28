@@ -1,47 +1,202 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Bollard in Your Rust Project"
+sidebarTitle: "Quickstart"
+description: "Add Bollard to your Rust project, connect to a local Docker daemon, list containers, and stream container stats in under 10 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through adding Bollard to a new or existing Rust project, establishing a connection to your local Docker daemon, and making your first real API calls — listing running containers and streaming live container stats.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  All Bollard API methods are `async` and require a [Tokio](https://tokio.rs/) runtime. The examples below use the `#[tokio::main]` macro for simplicity. See the [Installation page](/installation) for the required `tokio` dependency and available feature flags.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+  <Step title="Add Bollard to Cargo.toml">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+    Add `bollard` and `tokio` to your project's `Cargo.toml`. The default feature set (`http` + `pipe`) covers Unix sockets, Windows named pipes, and HTTP/TCP connections, which is all you need for local Docker access.
 
-    ```bash
-    your-cli start
+    ```toml Cargo.toml
+    [dependencies]
+    bollard = "0.21"
+    tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+    futures-util = "0.3"
     ```
+
+    <Tip>
+      Need TLS, SSH, BuildKit, or WebSocket support? See the [Installation page](/installation) for a full breakdown of optional feature flags.
+    </Tip>
+
   </Step>
+
+  <Step title="Connect to Docker">
+
+    Import `bollard::Docker` and call `Docker::connect_with_local_defaults()`. This method auto-detects the best available socket on your machine — the Unix socket on Linux/macOS or a Windows named pipe on Windows.
+
+    ```rust src/main.rs
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        println!("Connected to Docker daemon");
+    }
+    ```
+
+    Other connection methods are available depending on your environment:
+
+    | Method | When to use |
+    |---|---|
+    | `Docker::connect_with_local_defaults()` | Local socket / named pipe (recommended) |
+    | `Docker::connect_with_podman_defaults()` | Rootless or system Podman (Unix only) |
+    | `Docker::connect_with_socket_defaults()` | Explicit Unix socket or named pipe |
+    | `Docker::connect_with_http_defaults()` | Remote daemon over plain HTTP/TCP |
+    | `Docker::connect_with_ssl_defaults()` | Remote daemon over HTTPS (requires `ssl` feature) |
+
+  </Step>
+
+  <Step title="Verify the Connection with docker.version()">
+
+    Call `docker.version().await` to confirm the connection is working and print the daemon's API version.
+
+    ```rust src/main.rs
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        let version = docker.version().await.unwrap();
+        println!("{:?}", version);
+    }
+    ```
+
+    A successful run prints something like:
+
+    ```
+    VersionResponse { api_version: Some("1.47"), version: Some("27.3.1"), ... }
+    ```
+
+    <Note>
+      You can also call `docker.negotiate_version().await` to automatically downgrade the client to the API version your daemon actually supports, which is useful when connecting to older Docker or Podman instances.
+    </Note>
+
+  </Step>
+
+  <Step title="List Running Containers">
+
+    Use `docker.list_containers()` with a `ListContainersOptionsBuilder` to query the daemon for running containers. Filters are passed as a `HashMap<String, Vec<String>>`.
+
+    ```rust src/main.rs
+    use bollard::Docker;
+    use bollard::query_parameters::ListContainersOptionsBuilder;
+    use std::collections::HashMap;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        let mut filters = HashMap::new();
+        filters.insert("status".to_string(), vec!["running".to_string()]);
+
+        let containers = docker
+            .list_containers(Some(
+                ListContainersOptionsBuilder::default()
+                    .all(true)
+                    .filters(&filters)
+                    .build(),
+            ))
+            .await
+            .unwrap();
+
+        for container in containers {
+            println!("{:?}", container.id);
+        }
+    }
+    ```
+
+    `list_containers` returns a `Vec<ContainerSummary>` from `bollard::models`. Each `ContainerSummary` contains fields like `id`, `names`, `image`, `state`, `status`, `ports`, and `labels`.
+
+    <Tip>
+      To list **all** containers — including stopped ones — set `.all(true)` and omit the `status` filter, or pass `"status"` values of `"exited"`, `"paused"`, etc.
+    </Tip>
+
+  </Step>
+
+  <Step title="Stream Container Stats">
+
+    `docker.stats()` returns a `Stream` of `Stats` values. Use `futures_util::stream::TryStreamExt` to collect or process items as they arrive. Pass `.stream(true)` to keep the stream open; pass `.stream(false)` to get a single snapshot.
+
+    ```rust src/main.rs
+    use bollard::Docker;
+    use bollard::query_parameters::StatsOptionsBuilder;
+
+    use futures_util::stream::TryStreamExt;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        // Replace "postgres" with the name or ID of a running container
+        let stats = docker
+            .stats(
+                "postgres",
+                Some(StatsOptionsBuilder::default().stream(true).build()),
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        for stat in stats {
+            println!(
+                "{} - mem total: {:?} | mem usage: {:?}",
+                stat.name.as_ref().unwrap(),
+                stat.memory_stats.as_ref().unwrap().max_usage,
+                stat.memory_stats.as_ref().unwrap().usage,
+            );
+        }
+    }
+    ```
+
+    For a live dashboard-style loop, process each item as it arrives using `.try_next()` instead of collecting:
+
+    ```rust src/main.rs
+    use bollard::Docker;
+    use bollard::query_parameters::StatsOptionsBuilder;
+
+    use futures_util::stream::TryStreamExt;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        let mut stream = docker.stats(
+            "postgres",
+            Some(StatsOptionsBuilder::default().stream(true).build()),
+        );
+
+        while let Some(stat) = stream.try_next().await.unwrap() {
+            println!(
+                "cpu_stats: {:?}",
+                stat.cpu_stats
+            );
+        }
+    }
+    ```
+
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What's Next
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+You now have a working Bollard setup that can connect to a Docker daemon, inspect running containers, and consume streaming stats. From here you can explore the full API surface:
+
+- **`bollard::container`** — create, start, stop, attach, wait, and remove containers
+- **`bollard::image`** — pull, build, tag, and push images
+- **`bollard::exec`** — run commands inside a running container (see the [exec example](https://github.com/fussybeaver/bollard/blob/master/examples/exec.rs))
+- **`bollard::network`** / **`bollard::volume`** — manage networks and volumes
+- **`bollard::service`** / **`bollard::swarm`** — orchestrate with Docker Swarm
+
+For feature flags (TLS, SSH, BuildKit, WebSocket, datetime), see the [Installation guide](/installation).
+For full API reference, see [docs.rs/bollard](https://docs.rs/bollard/).

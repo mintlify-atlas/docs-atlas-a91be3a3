@@ -1,0 +1,216 @@
+---
+title: "Authentication and Credentials in Bollard"
+sidebarTitle: "Auth"
+description: "Pass Docker registry credentials to Bollard using DockerCredentials for push, pull, and build operations with Docker Hub or private registries."
+---
+
+Bollard uses the `DockerCredentials` struct from `bollard::auth` to pass registry authentication information to operations that require it. Credentials are serialised to JSON, base64-encoded, and sent in HTTP request headers — exactly as the Docker CLI does internally.
+
+---
+
+## `DockerCredentials`
+
+```rust
+use bollard::auth::DockerCredentials;
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `username` | `Option<String>` | Registry username. |
+| `password` | `Option<String>` | Registry password or access token. |
+| `auth` | `Option<String>` | Base64-encoded `username:password` token (alternative to separate username/password). |
+| `email` | `Option<String>` | Email address associated with the account (rarely required). |
+| `serveraddress` | `Option<String>` | Registry server URL, e.g. `"https://index.docker.io/v1/"` for Docker Hub or `"https://registry.example.com"` for private registries. |
+| `identitytoken` | `Option<String>` | Identity token returned by an external authentication provider (e.g. Docker credential helpers). |
+| `registrytoken` | `Option<String>` | Bearer token for the registry. Takes precedence over username/password. |
+
+All fields are optional — populate only the ones required by your registry.
+
+---
+
+## Where credentials are used
+
+`DockerCredentials` is accepted by the following `Docker` methods:
+
+| Method | Header |
+|---|---|
+| `push_image(name, tag, credentials)` | `X-Registry-Auth` |
+| `create_image(options, credentials)` | `X-Registry-Auth` |
+| `build_image(options, credentials, body)` | `X-Registry-Config` (map of host → credentials) |
+| `inspect_registry_image(name, credentials)` | `X-Registry-Auth` |
+| `create_service(spec, credentials)` | `X-Registry-Auth` |
+| `update_service(name, spec, options, credentials)` | `X-Registry-Auth` |
+| `install_plugin(options, privileges, credentials)` | `X-Registry-Auth` |
+| `upgrade_plugin(name, options, privileges, credentials)` | `X-Registry-Auth` |
+| `push_plugin(name, credentials)` | `X-Registry-Auth` |
+
+<Note>
+Credentials are transmitted in the `X-Registry-Auth` header as a base64-encoded JSON object. Bollard handles the encoding automatically — you only need to populate the struct.
+
+For operations that touch multiple registries simultaneously (such as `build_image`), Docker uses `X-Registry-Config`, which is a JSON map of server address → `DockerCredentials` object.
+</Note>
+
+---
+
+## Example: authenticate to Docker Hub
+
+```rust
+use bollard::Docker;
+use bollard::auth::DockerCredentials;
+use bollard::image::CreateImageOptions;
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let credentials = Some(DockerCredentials {
+        username: Some("myusername".to_string()),
+        password: Some("mypassword".to_string()),
+        serveraddress: Some("https://index.docker.io/v1/".to_string()),
+        ..Default::default()
+    });
+
+    // Pull a private image
+    let options = CreateImageOptions {
+        from_image: "myusername/private-image",
+        tag: "latest",
+        ..Default::default()
+    };
+
+    let mut stream = docker.create_image(Some(options), None, credentials);
+    while let Some(info) = stream.try_next().await? {
+        println!("{:?}", info.status);
+    }
+    Ok(())
+}
+```
+
+---
+
+## Example: push an image to Docker Hub
+
+```rust
+use bollard::Docker;
+use bollard::auth::DockerCredentials;
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let credentials = Some(DockerCredentials {
+        username: Some("myusername".to_string()),
+        password: Some("mypassword".to_string()),
+        serveraddress: Some("https://index.docker.io/v1/".to_string()),
+        ..Default::default()
+    });
+
+    let mut push_stream = docker.push_image(
+        "myusername/my-app",
+        Some(bollard::image::PushImageOptions { tag: "latest" }),
+        credentials,
+    );
+
+    while let Some(info) = push_stream.try_next().await? {
+        println!("{:?}", info.status);
+    }
+    Ok(())
+}
+```
+
+---
+
+## Example: authenticate to a private registry
+
+```rust
+use bollard::Docker;
+use bollard::auth::DockerCredentials;
+use bollard::image::CreateImageOptions;
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let credentials = Some(DockerCredentials {
+        username: Some("robot-user".to_string()),
+        password: Some("robot-secret".to_string()),
+        serveraddress: Some("https://registry.example.com".to_string()),
+        ..Default::default()
+    });
+
+    let options = CreateImageOptions {
+        from_image: "registry.example.com/myorg/myapp",
+        tag: "v2.0",
+        ..Default::default()
+    };
+
+    let mut stream = docker.create_image(Some(options), None, credentials);
+    while let Some(info) = stream.try_next().await? {
+        println!("{:?}", info.status);
+    }
+    Ok(())
+}
+```
+
+---
+
+## Example: multi-registry build
+
+For `build_image`, pass a `HashMap<String, DockerCredentials>` mapping registry hostnames to credentials:
+
+```rust
+use bollard::Docker;
+use bollard::auth::DockerCredentials;
+use bollard::image::BuildImageOptions;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let mut registry_credentials: HashMap<String, DockerCredentials> = HashMap::new();
+
+    registry_credentials.insert(
+        "https://index.docker.io/v1/".to_string(),
+        DockerCredentials {
+            username: Some("myuser".to_string()),
+            password: Some("mypassword".to_string()),
+            ..Default::default()
+        },
+    );
+
+    registry_credentials.insert(
+        "registry.example.com".to_string(),
+        DockerCredentials {
+            username: Some("robot".to_string()),
+            password: Some("token".to_string()),
+            serveraddress: Some("registry.example.com".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // build_image accepts Option<HashMap<String, DockerCredentials>>
+    // for the X-Registry-Config header
+    let options = BuildImageOptions {
+        dockerfile: "Dockerfile",
+        t: "my-app:latest",
+        ..Default::default()
+    };
+
+    // tar archive of the build context
+    let body = bytes::Bytes::new();
+    let mut build_stream = docker.build_image(options, Some(registry_credentials), Some(body.into()));
+
+    use futures_util::stream::TryStreamExt;
+    while let Some(info) = build_stream.try_next().await? {
+        println!("{:?}", info.stream);
+    }
+    Ok(())
+}
+```
+
+<Tip>
+Prefer using `identitytoken` or `registrytoken` over plain `username`/`password` in production. Many registries (including Docker Hub) support short-lived access tokens that reduce the risk of credential leakage. Credential helpers (via `docker-credential-*`) return identity tokens that you can pass directly.
+</Tip>

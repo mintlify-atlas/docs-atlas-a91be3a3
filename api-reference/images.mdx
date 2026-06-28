@@ -1,0 +1,522 @@
+---
+title: "Images API Reference for Bollard"
+sidebarTitle: "Images"
+description: "Complete reference for Bollard image methods: list, pull, build, tag, push, inspect, export, import, and prune with parameter details."
+---
+
+The image API covers pulling, building, inspecting, tagging, pushing, exporting, importing, and pruning Docker images. All methods are on the `Docker` struct. Options builders live in `bollard::query_parameters`; model structs live in `bollard::models`. Registry authentication uses `bollard::auth::DockerCredentials`.
+
+## Methods
+
+### `list_images`
+
+```rust
+pub async fn list_images(
+    &self,
+    options: Option<impl Into<ListImagesOptions>>,
+) -> Result<Vec<ImageSummary>, Error>
+```
+
+Returns a compact list of images on the daemon. Uses a smaller representation than `inspect_image`.
+
+**Options:** `ListImagesOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `all` | `bool` | Include intermediate image layers. |
+| `digests` | `bool` | Include image digests. |
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `dangling`, `label`, `reference`, `before`, `since`. |
+
+**Returns:** `Vec<ImageSummary>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListImagesOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("dangling", vec!["true"]);
+
+let options = ListImagesOptionsBuilder::default()
+    .all(true)
+    .filters(&filters)
+    .build();
+
+let images = docker.list_images(Some(options)).await.unwrap();
+println!("Found {} images", images.len());
+```
+
+---
+
+### `create_image`
+
+```rust
+pub fn create_image(
+    &self,
+    options: Option<impl Into<CreateImageOptions>>,
+    root_fs: Option<BodyType>,
+    credentials: Option<DockerCredentials>,
+) -> impl Stream<Item = Result<CreateImageInfo, Error>>
+```
+
+Creates an image by pulling it from a registry or importing it from a tar archive. Progress updates are streamed as `CreateImageInfo` items. Errors embedded in the stream (e.g. network failures mid-pull) are surfaced as `Err(DockerStreamError)`.
+
+**Options:** `CreateImageOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from_image` | `&str` | Name (and optional tag) of the image to pull (e.g. `"alpine:latest"`). |
+| `from_src` | `&str` | URL or `-` when importing from a tar body via `root_fs`. |
+| `repo` | `&str` | Repository to tag the imported image into. |
+| `tag` | `&str` | Tag for the imported image. |
+| `platform` | `&str` | Target platform (e.g. `"linux/arm64"`). |
+
+**Returns:** `impl Stream<Item = Result<CreateImageInfo, Error>>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::CreateImageOptionsBuilder;
+use futures_util::StreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = CreateImageOptionsBuilder::default()
+    .from_image("alpine")
+    .tag("latest")
+    .build();
+
+let mut stream = docker.create_image(Some(options), None, None);
+while let Some(info) = stream.next().await {
+    match info {
+        Ok(msg) => println!("{:?}", msg.status),
+        Err(e) => eprintln!("Pull error: {e}"),
+    }
+}
+```
+
+---
+
+### `inspect_image`
+
+```rust
+pub async fn inspect_image(&self, image_name: &str) -> Result<ImageInspect, Error>
+```
+
+Returns detailed low-level information about a local image including layers, configuration, and metadata.
+
+**Returns:** `ImageInspect`
+
+```rust
+let image = docker.inspect_image("alpine:latest").await.unwrap();
+println!("Architecture: {:?}", image.architecture);
+println!("Created:      {:?}", image.created);
+```
+
+---
+
+### `inspect_registry_image`
+
+```rust
+pub async fn inspect_registry_image(
+    &self,
+    image_name: &str,
+    credentials: Option<DockerCredentials>,
+) -> Result<DistributionInspect, Error>
+```
+
+Returns the image digest and platform information by contacting the registry directly. Useful to check what would be pulled before actually pulling.
+
+**Returns:** `DistributionInspect` — contains `descriptor` (digest, media type, size) and `platforms`.
+
+---
+
+### `prune_images`
+
+```rust
+pub async fn prune_images(
+    &self,
+    options: Option<impl Into<PruneImagesOptions>>,
+) -> Result<ImagePruneResponse, Error>
+```
+
+Removes unused images (dangling or all unreferenced images depending on filters).
+
+**Options:** `PruneImagesOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `dangling` (`"true"`/`"false"`), `until`, `label`. |
+
+**Returns:** `ImagePruneResponse` — contains `images_deleted: Vec<ImageDeleteResponseItem>` and `space_reclaimed: i64`.
+
+---
+
+### `image_history`
+
+```rust
+pub async fn image_history(&self, image_name: &str) -> Result<Vec<ImageHistoryResponseItem>, Error>
+```
+
+Returns the parent layers of an image in reverse chronological order. Each item includes the layer ID, creation timestamp, and the command that created it.
+
+**Returns:** `Vec<ImageHistoryResponseItem>`
+
+---
+
+### `search_images`
+
+```rust
+pub async fn search_images(
+    &self,
+    options: impl Into<SearchImagesOptions>,
+) -> Result<Vec<ImageSearchResponseItem>, Error>
+```
+
+Searches Docker Hub for images matching a term.
+
+**Options:** `SearchImagesOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `term` | `&str` | Search term. |
+| `limit` | `i64` | Maximum number of results. |
+| `filters` | `&HashMap<&str, Vec<&str>>` | Filter by `is-automated`, `is-official`, `stars`. |
+
+**Returns:** `Vec<ImageSearchResponseItem>`
+
+---
+
+### `remove_image`
+
+```rust
+pub async fn remove_image(
+    &self,
+    image_name: &str,
+    options: Option<impl Into<RemoveImageOptions>>,
+    credentials: Option<DockerCredentials>,
+) -> Result<Vec<ImageDeleteResponseItem>, Error>
+```
+
+Removes an image and any untagged parent images that were referenced by it.
+
+**Options:** `RemoveImageOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `force` | `bool` | Force removal even if the image has dependent child images. |
+| `noprune` | `bool` | Do not delete untagged parent images. |
+
+**Returns:** `Vec<ImageDeleteResponseItem>` — each item is either an `Untagged` or `Deleted` entry.
+
+---
+
+### `tag_image`
+
+```rust
+pub async fn tag_image(
+    &self,
+    image_name: &str,
+    options: Option<impl Into<TagImageOptions>>,
+) -> Result<(), Error>
+```
+
+Tags an image so that it becomes part of a repository.
+
+**Options:** `TagImageOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `repo` | `&str` | Target repository (e.g. `"myregistry.io/myapp"`). |
+| `tag` | `&str` | Tag to apply (e.g. `"v1.0.0"`). |
+
+**Returns:** `()`
+
+---
+
+### `push_image`
+
+```rust
+pub fn push_image(
+    &self,
+    image_name: &str,
+    options: Option<impl Into<PushImageOptions>>,
+    credentials: Option<DockerCredentials>,
+) -> impl Stream<Item = Result<PushImageInfo, Error>>
+```
+
+Pushes an image to a registry. Progress updates and errors are streamed. Errors embedded in the stream are surfaced as `Err(DockerStreamError)`.
+
+**Options:** `PushImageOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tag` | `&str` | Tag to push. |
+
+**Returns:** `impl Stream<Item = Result<PushImageInfo, Error>>`
+
+```rust
+use bollard::auth::DockerCredentials;
+use bollard::query_parameters::PushImageOptionsBuilder;
+use futures_util::TryStreamExt;
+
+let credentials = Some(DockerCredentials {
+    username: Some("myuser".to_string()),
+    password: Some("mypassword".to_string()),
+    ..Default::default()
+});
+
+let options = PushImageOptionsBuilder::default().tag("v1.0.0").build();
+
+docker
+    .push_image("myregistry.io/myapp", Some(options), credentials)
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+```
+
+---
+
+### `commit_container`
+
+```rust
+pub async fn commit_container(
+    &self,
+    options: impl Into<CommitContainerOptions>,
+    config: impl Into<ContainerConfig>,
+) -> Result<IdResponse, Error>
+```
+
+Creates a new image from a container's current state.
+
+**Options:** `CommitContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `container` | `&str` | Container name or ID to commit. |
+| `repo` | `&str` | Target repository name. |
+| `tag` | `&str` | Tag for the new image. |
+| `comment` | `&str` | Commit message. |
+| `author` | `&str` | Author of the commit. |
+| `pause` | `bool` | Pause the container before committing. |
+| `changes` | `&str` | `Dockerfile` instructions to apply. |
+
+**Returns:** `IdResponse` — contains the new image `id`.
+
+---
+
+### `build_image`
+
+```rust
+pub fn build_image(
+    &self,
+    options: impl Into<BuildImageOptions>,
+    credentials: Option<HashMap<String, DockerCredentials>>,
+    tar: Option<BodyType>,
+) -> impl Stream<Item = Result<BuildInfo, Error>>
+```
+
+Builds an image from a tar archive containing a `Dockerfile`. Use `bollard::body_full(bytes)` for in-memory tarballs or `bollard::body_stream(stream)` for streaming uploads. Build output is streamed as `BuildInfo` items.
+
+**Options:** `BuildImageOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `t` | `&str` | Name and optional tag for the built image (e.g. `"myapp:latest"`). |
+| `dockerfile` | `&str` | Path to the `Dockerfile` inside the tar context. Default `"Dockerfile"`. |
+| `pull` | `&str` | Always pull a newer version of the base image (`"true"`). |
+| `nocache` | `bool` | Do not use the build cache. |
+| `rm` | `bool` | Remove intermediate containers after a successful build. |
+| `buildargs` | `&HashMap<&str, &str>` | Build arguments (`ARG` values). |
+| `labels` | `&HashMap<&str, &str>` | Labels to apply to the built image. |
+| `target` | `&str` | Multi-stage target to build. |
+| `version` | `BuilderVersion` | `BuilderBuildKit` for BuildKit, `BuilderV1` (default) for legacy builder. |
+| `session` | `Option<String>` | Session ID required when `version = BuilderBuildKit`. |
+
+**Returns:** `impl Stream<Item = Result<BuildInfo, Error>>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::BuildImageOptionsBuilder;
+use bollard::body_full;
+use futures_util::TryStreamExt;
+use std::fs::File;
+use std::io::Read;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = BuildImageOptionsBuilder::default()
+        .dockerfile("Dockerfile")
+        .t("my-image:latest")
+        .rm(true)
+        .build();
+
+    let mut file = File::open("context.tar.gz").unwrap();
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).unwrap();
+
+    docker
+        .build_image(options, None, Some(body_full(contents.into())))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+}
+```
+
+---
+
+### `prune_build`
+
+```rust
+pub async fn prune_build(
+    &self,
+    options: Option<impl Into<PruneBuildOptions>>,
+) -> Result<BuildPruneResponse, Error>
+```
+
+Deletes the contents of the build cache.
+
+**Options:** `PruneBuildOptionsBuilder` — supports `filters` (`until`, `id`, `parent`, `type`, `description`, `inuse`, `shared`, `private`).
+
+**Returns:** `BuildPruneResponse` — contains `caches_deleted: Vec<String>` and `space_reclaimed: i64`.
+
+---
+
+### `export_image`
+
+```rust
+pub fn export_image(&self, image_name: &str) -> impl Stream<Item = Result<Bytes, Error>>
+```
+
+Exports a single image as an uncompressed TAR archive. The archive contains a `manifest.json`, a `repositories` file, and layer subdirectories.
+
+**Returns:** `impl Stream<Item = Result<Bytes, Error>>`
+
+---
+
+### `export_images`
+
+```rust
+pub fn export_images(&self, image_names: &[&str]) -> impl Stream<Item = Result<Bytes, Error>>
+```
+
+Exports multiple images into a single TAR archive with deduplicated shared layers.
+
+**Returns:** `impl Stream<Item = Result<Bytes, Error>>`
+
+---
+
+### `import_image`
+
+```rust
+pub fn import_image(
+    &self,
+    options: impl Into<ImportImageOptions>,
+    root_fs: BodyType,
+    credentials: Option<HashMap<String, DockerCredentials>>,
+) -> impl Stream<Item = Result<BuildInfo, Error>>
+```
+
+Loads a set of images from a tar archive body (`BodyType`). Use `bollard::body_full(bytes)` for in-memory data.
+
+**Returns:** `impl Stream<Item = Result<BuildInfo, Error>>`
+
+---
+
+### `import_image_stream`
+
+```rust
+pub fn import_image_stream<S, E>(
+    &self,
+    options: impl Into<ImportImageOptions>,
+    root_fs: S,
+    credentials: Option<HashMap<String, DockerCredentials>>,
+) -> impl Stream<Item = Result<BuildInfo, Error>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
+```
+
+Like `import_image` but accepts a `Stream<Item = Result<Bytes, E>>` directly, avoiding holding the entire archive in memory.
+
+**Returns:** `impl Stream<Item = Result<BuildInfo, Error>>`
+
+---
+
+## Pull and Build Example
+
+<CodeGroup>
+
+```rust Pull an Image
+use bollard::Docker;
+use bollard::query_parameters::CreateImageOptionsBuilder;
+use futures_util::TryStreamExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = CreateImageOptionsBuilder::default()
+        .from_image("alpine")
+        .tag("3.19")
+        .build();
+
+    docker
+        .create_image(Some(options), None, None)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    println!("alpine:3.19 pulled successfully");
+}
+```
+
+```rust Build from In-Memory Tarball
+use bollard::Docker;
+use bollard::query_parameters::BuildImageOptionsBuilder;
+use bollard::body_full;
+use futures_util::TryStreamExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // Build a minimal tar context with a Dockerfile
+    let dockerfile = b"FROM alpine\nRUN echo hello\n";
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_path("Dockerfile").unwrap();
+    header.set_size(dockerfile.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tar_builder.append(&header, dockerfile.as_slice()).unwrap();
+    let tar_bytes = tar_builder.into_inner().unwrap();
+
+    let options = BuildImageOptionsBuilder::default()
+        .dockerfile("Dockerfile")
+        .t("my-hello:latest")
+        .rm(true)
+        .build();
+
+    let output: Vec<_> = docker
+        .build_image(options, None, Some(body_full(tar_bytes.into())))
+        .try_collect()
+        .await
+        .unwrap();
+
+    for item in &output {
+        if let Some(stream) = &item.stream {
+            print!("{stream}");
+        }
+    }
+}
+```
+
+</CodeGroup>
+
+<Note>
+Methods that accept `Option<DockerCredentials>` or `Option<HashMap<String, DockerCredentials>>` pass credentials in the `X-Registry-Auth` or `X-Registry-Config` request header respectively, base64url-encoded. The `DockerCredentials` struct supports `username`, `password`, `server_address`, and `identitytoken`.
+</Note>

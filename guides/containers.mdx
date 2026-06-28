@@ -1,0 +1,444 @@
+---
+title: "Working with Docker Containers in Bollard"
+sidebarTitle: "Containers"
+description: "Create, start, stop, inspect, attach, stream logs, and manage container lifecycles using Bollard's async container API."
+---
+
+Bollard exposes the full Docker container lifecycle through the `Docker` struct. Every container operation is `async`, returning either a `Future` or a `Stream`. Long-running output—logs, stats, attach—is modelled as a Rust `Stream` that you consume with `futures_util::TryStreamExt`.
+
+## Listing Containers
+
+`list_containers` returns a `Vec<ContainerSummary>`. Use `ListContainersOptionsBuilder` to filter by status, label, or any other Docker filter key.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListContainersOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert(String::from("status"), vec![String::from("running")]);
+
+let containers = docker
+    .list_containers(Some(
+        ListContainersOptionsBuilder::default()
+            .all(true)
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+for c in &containers {
+    println!("{:?} — {:?}", c.id, c.names);
+}
+```
+
+<Tip>
+  Pass `all(true)` to include stopped containers; without it only running
+  containers are returned.
+</Tip>
+
+## Creating a Container
+
+`create_container` prepares a container without starting it. Pass an optional `CreateContainerOptions` (to name the container) and a `ContainerCreateBody` from `bollard::models` describing the image, command, environment variables, and more.
+
+```rust
+use bollard::Docker;
+use bollard::models::ContainerCreateBody;
+use bollard::query_parameters::CreateContainerOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = CreateContainerOptionsBuilder::default()
+    .name("my-app")
+    .build();
+
+let config = ContainerCreateBody {
+    image: Some("alpine:3".to_string()),
+    cmd: Some(vec!["echo".to_string(), "hello bollard".to_string()]),
+    env: Some(vec!["MY_VAR=hello".to_string()]),
+    tty: Some(false),
+    ..Default::default()
+};
+
+let response = docker.create_container(Some(options), config).await?;
+println!("Container ID: {}", response.id);
+```
+
+## Starting, Stopping, and Restarting
+
+<Steps>
+  <Step title="Start">
+    ```rust
+    docker
+        .start_container(
+            &id,
+            None::<bollard::query_parameters::StartContainerOptions>,
+        )
+        .await?;
+    ```
+  </Step>
+  <Step title="Stop">
+    ```rust
+    use bollard::query_parameters::StopContainerOptionsBuilder;
+
+    // Wait up to 30 seconds for the container to stop gracefully
+    docker
+        .stop_container(
+            &id,
+            Some(StopContainerOptionsBuilder::default().t(30).build()),
+        )
+        .await?;
+    ```
+  </Step>
+  <Step title="Restart">
+    ```rust
+    use bollard::query_parameters::RestartContainerOptionsBuilder;
+
+    docker
+        .restart_container(
+            &id,
+            Some(RestartContainerOptionsBuilder::default().t(10).build()),
+        )
+        .await?;
+    ```
+  </Step>
+</Steps>
+
+## Inspecting a Container
+
+`inspect_container` returns a `ContainerInspectResponse` with detailed information including network settings, mounts, state, and the host config.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::InspectContainerOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let info = docker
+    .inspect_container(
+        "my-app",
+        Some(InspectContainerOptionsBuilder::default().size(false).build()),
+    )
+    .await?;
+
+println!("Status: {:?}", info.state.and_then(|s| s.status));
+```
+
+The example below shows how to inspect multiple containers concurrently using `futures_util::stream`:
+
+```rust
+use bollard::models::ContainerSummary;
+use bollard::Docker;
+use futures_util::stream::{self, StreamExt};
+
+async fn inspect_one(arg: (Docker, &ContainerSummary)) {
+    let (docker, container) = arg;
+    println!(
+        "{:?}",
+        docker
+            .inspect_container(
+                container.id.as_ref().unwrap(),
+                None::<bollard::query_parameters::InspectContainerOptions>
+            )
+            .await
+            .unwrap()
+    );
+}
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+let containers = docker
+    .list_containers(None::<bollard::query_parameters::ListContainersOptions>)
+    .await?;
+
+let docker_stream = stream::repeat(docker);
+docker_stream
+    .zip(stream::iter(&containers))
+    .for_each_concurrent(2, inspect_one)
+    .await;
+```
+
+## Streaming Logs
+
+`logs` returns a `Stream<Item = Result<LogOutput, Error>>`. `LogOutput` is an enum with `StdOut`, `StdErr`, `StdIn`, and `Console` variants, all of which implement `Display` for easy printing.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LogsOptionsBuilder;
+use futures_util::TryStreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut log_stream = docker.logs(
+    "my-app",
+    Some(
+        LogsOptionsBuilder::default()
+            .stdout(true)
+            .stderr(true)
+            .follow(true)
+            .build(),
+    ),
+);
+
+while let Some(msg) = log_stream.try_next().await? {
+    print!("{msg}");
+}
+```
+
+<Note>
+  Set `follow(true)` to tail the log stream in real time. Without it the call
+  returns existing log lines and completes.
+</Note>
+
+## Streaming Stats
+
+`stats` returns a `Stream<Item = Result<ContainerStatsResponse, Error>>` with per-tick CPU, memory, network I/O, and block I/O metrics.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::StatsOptionsBuilder;
+use futures_util::stream::StreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+// Take a single snapshot (stream: false / one_shot: true)
+let mut stream = docker.stats(
+    "my-app",
+    Some(
+        StatsOptionsBuilder::default()
+            .stream(false)
+            .one_shot(true)
+            .build(),
+    ),
+);
+
+if let Some(Ok(stats)) = stream.next().await {
+    println!("CPU delta: {:?}", stats.cpu_stats);
+    println!("Memory: {:?}", stats.memory_stats);
+}
+```
+
+The full stats example from the bollard repository streams all running containers in a loop:
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::{ListContainersOptionsBuilder, StatsOptionsBuilder};
+use futures_util::stream::StreamExt;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    loop {
+        let mut filter = HashMap::new();
+        filter.insert(String::from("status"), vec![String::from("running")]);
+
+        let containers = &docker
+            .list_containers(Some(
+                ListContainersOptionsBuilder::default()
+                    .all(true)
+                    .filters(&filter)
+                    .build(),
+            ))
+            .await?;
+
+        if containers.is_empty() {
+            panic!("no running containers");
+        } else {
+            for container in containers {
+                let container_id = container.id.as_ref().unwrap();
+                let stream = &mut docker
+                    .stats(
+                        container_id,
+                        Some(
+                            StatsOptionsBuilder::default()
+                                .stream(false)
+                                .build(),
+                        ),
+                    )
+                    .take(1);
+
+                while let Some(Ok(stats)) = stream.next().await {
+                    println!(
+                        "{} - {:?}: {:?} {:?}",
+                        container_id, &container.names, container.image, stats
+                    );
+                }
+            }
+        }
+    }
+}
+```
+
+## Attaching to a Container
+
+`attach_container` upgrades the HTTP connection to a raw TCP stream and returns `AttachContainerResults`, which contains:
+
+- `output` — a `Stream<Item = Result<LogOutput, Error>>` for reading stdout/stderr.
+- `input` — an `AsyncWrite` sink for writing bytes to stdin.
+
+```rust
+use bollard::Docker;
+use bollard::models::ContainerCreateBody;
+use bollard::query_parameters::AttachContainerOptionsBuilder;
+use futures_util::{StreamExt, TryStreamExt};
+use tokio::io::AsyncWriteExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = ContainerCreateBody {
+    image: Some("alpine:3".to_string()),
+    tty: Some(true),
+    attach_stdin: Some(true),
+    attach_stdout: Some(true),
+    attach_stderr: Some(true),
+    open_stdin: Some(true),
+    ..Default::default()
+};
+
+let id = docker
+    .create_container(
+        None::<bollard::query_parameters::CreateContainerOptions>,
+        config,
+    )
+    .await?
+    .id;
+
+docker
+    .start_container(&id, None::<bollard::query_parameters::StartContainerOptions>)
+    .await?;
+
+let bollard::container::AttachContainerResults { mut output, mut input } = docker
+    .attach_container(
+        &id,
+        Some(
+            AttachContainerOptionsBuilder::default()
+                .stdout(true)
+                .stderr(true)
+                .stdin(true)
+                .stream(true)
+                .build(),
+        ),
+    )
+    .await?;
+
+// Write a command to stdin
+input.write_all(b"echo hello\n").await?;
+
+// Read the response
+while let Some(Ok(msg)) = output.next().await {
+    print!("{msg}");
+}
+```
+
+<Note>
+  For running one-shot commands inside a container prefer `create_exec` /
+  `start_exec`. See the [Exec guide](/guides/exec) for details.
+</Note>
+
+## Exec (brief)
+
+For running commands inside a running container without attaching to the primary process, use `create_exec` followed by `start_exec`. See the [Exec guide](/guides/exec) for the full walkthrough.
+
+## Pausing and Unpausing
+
+`pause_container` suspends all processes via cgroups freezer; `unpause_container` resumes them.
+
+```rust
+docker.pause_container("my-app").await?;
+// ... do something while paused ...
+docker.unpause_container("my-app").await?;
+```
+
+## Killing and Removing
+
+```rust
+use bollard::query_parameters::{KillContainerOptionsBuilder, RemoveContainerOptionsBuilder};
+
+// Send a specific signal
+docker
+    .kill_container(
+        "my-app",
+        Some(KillContainerOptionsBuilder::default().signal("SIGTERM").build()),
+    )
+    .await?;
+
+// Force-remove (also removes anonymous volumes)
+docker
+    .remove_container(
+        "my-app",
+        Some(
+            RemoveContainerOptionsBuilder::default()
+                .force(true)
+                .v(true)
+                .build(),
+        ),
+    )
+    .await?;
+```
+
+## Pruning Stopped Containers
+
+`prune_containers` deletes all stopped containers. An optional filter can restrict by `until` timestamp or `label`.
+
+```rust
+use bollard::query_parameters::PruneContainersOptionsBuilder;
+use std::collections::HashMap;
+
+let mut filters = HashMap::new();
+filters.insert("until".to_string(), vec!["10m".to_string()]);
+
+let pruned = docker
+    .prune_containers(Some(
+        PruneContainersOptionsBuilder::default()
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+println!("Reclaimed: {:?} bytes", pruned.space_reclaimed);
+```
+
+## Checkpoints (Experimental)
+
+<Warning>
+  Checkpoints are an **experimental** Docker feature. They require the Docker
+  daemon to be started with `--experimental` and CRIU installed on the host
+  (Linux only). They are not available on Docker Desktop or Windows.
+</Warning>
+
+```rust
+use bollard::container::{CreateCheckpointOptions, ListCheckpointsOptions, DeleteCheckpointOptions};
+
+// Create a checkpoint (optionally exiting the container)
+docker
+    .create_checkpoint(
+        "my-container",
+        CreateCheckpointOptions {
+            checkpoint_id: "snap1".to_string(),
+            exit: false,
+            checkpoint_dir: None,
+        },
+    )
+    .await?;
+
+// List checkpoints
+let checkpoints = docker
+    .list_checkpoints("my-container", None::<ListCheckpointsOptions>)
+    .await?;
+
+for cp in &checkpoints {
+    println!("Checkpoint: {}", cp.name);
+}
+
+// Delete a checkpoint
+docker
+    .delete_checkpoint(
+        "my-container",
+        "snap1",
+        None::<DeleteCheckpointOptions>,
+    )
+    .await?;
+```

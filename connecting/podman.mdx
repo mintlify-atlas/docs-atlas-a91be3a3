@@ -1,0 +1,184 @@
+---
+title: "Connect Bollard to Podman with Socket Auto-Discovery"
+sidebarTitle: "Podman"
+description: "Bollard supports Podman as a first-class runtime. Use connect_with_podman_defaults for automatic rootless and rootful socket discovery on Linux."
+---
+
+Bollard treats [Podman](https://podman.io/) as a first-class container runtime alongside Docker. The `connect_with_podman_defaults` method performs automatic socket discovery for both rootless and system (rootful) Podman installations, so you rarely need to specify socket paths manually.
+
+<Note>
+  `connect_with_podman_defaults` is currently **Unix only**. The `pipe` feature flag (enabled by default) is required.
+</Note>
+
+---
+
+## `Docker::connect_with_podman_defaults`
+
+Probes a prioritised list of well-known socket locations and connects to the first one that exists on the filesystem.
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_podman_defaults().unwrap();
+```
+
+### Function signature
+
+```rust
+#[cfg(unix)]
+pub fn connect_with_podman_defaults() -> Result<Docker, Error>
+```
+
+---
+
+## Socket Discovery Order
+
+The method walks through the following candidates in order and uses the first socket that exists:
+
+<Steps>
+  <Step title="$DOCKER_HOST (explicit override)">
+    If the `DOCKER_HOST` environment variable is set **and** starts with `unix://`, it is used directly — no filesystem probe is performed.
+
+    ```bash
+    export DOCKER_HOST=unix:///run/user/1000/podman/podman.sock
+    ```
+  </Step>
+  <Step title="$XDG_RUNTIME_DIR/podman/podman.sock (rootless, preferred)">
+    The canonical rootless socket. Requires `XDG_RUNTIME_DIR` to be set — most systemd-based Linux distributions set this automatically at login.
+
+    ```
+    $XDG_RUNTIME_DIR/podman/podman.sock
+    ```
+  </Step>
+  <Step title="/run/user/$UID/podman/podman.sock (rootless fallback)">
+    Constructed at runtime by substituting the current process's UID. Used when `XDG_RUNTIME_DIR` is unset or does not contain a Podman socket.
+
+    ```
+    /run/user/1000/podman/podman.sock
+    ```
+  </Step>
+  <Step title="/run/podman/podman.sock (system / rootful)">
+    The system-wide Podman socket, typically owned by root or the `podman` group. Requires appropriate group membership or `sudo`.
+
+    ```
+    /run/podman/podman.sock
+    ```
+  </Step>
+  <Step title="/var/run/docker.sock (Docker fallback)">
+    Falls back to the standard Docker socket if none of the Podman sockets exist. This allows the same code to work on hosts that run Docker instead of Podman.
+
+    ```
+    /var/run/docker.sock
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Feature Flag
+
+<Note>
+  This method requires the **`pipe`** feature, which is enabled by default. No extra configuration is needed for most projects.
+
+  ```toml
+  bollard = "*"   # pipe is on by default
+  ```
+
+  To use a minimal build with only Podman socket support:
+
+  ```toml
+  bollard = { version = "*", default-features = false, features = ["pipe"] }
+  ```
+</Note>
+
+---
+
+## Overriding the Socket at Runtime
+
+<Tip>
+  Set `DOCKER_HOST` to a `unix://` URL to bypass auto-discovery entirely. This is the recommended way to pin a specific Podman socket — for example, when running multiple Podman instances or in CI environments.
+
+  ```bash
+  # Rootless socket for a specific user
+  export DOCKER_HOST=unix:///run/user/1000/podman/podman.sock
+
+  # System (rootful) socket
+  export DOCKER_HOST=unix:///run/podman/podman.sock
+  ```
+</Tip>
+
+---
+
+## Complete Example
+
+<Steps>
+  <Step title="Start the Podman socket service">
+    On systemd-based Linux distributions, enable the Podman socket for your user:
+
+    ```bash
+    systemctl --user enable --now podman.socket
+    ```
+
+    Or for the system-wide (rootful) socket:
+
+    ```bash
+    sudo systemctl enable --now podman.socket
+    ```
+  </Step>
+  <Step title="Add Bollard to Cargo.toml">
+    ```toml
+    [dependencies]
+    bollard = "*"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Connect with auto-discovery">
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        let docker = Docker::connect_with_podman_defaults()
+            .expect("Failed to connect to Podman");
+
+        let version = docker.version().await.unwrap();
+        println!("Podman version: {:?}", version.version);
+    }
+    ```
+  </Step>
+  <Step title="Or override the socket explicitly">
+    ```bash
+    export DOCKER_HOST=unix:///run/user/1000/podman/podman.sock
+    cargo run
+    ```
+
+    ```rust
+    use bollard::Docker;
+
+    #[tokio::main]
+    async fn main() {
+        // DOCKER_HOST is honoured automatically by connect_with_podman_defaults
+        let docker = Docker::connect_with_podman_defaults()
+            .expect("Failed to connect to Podman");
+
+        let version = docker.version().await.unwrap();
+        println!("Podman version: {:?}", version.version);
+    }
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Podman vs Docker Socket
+
+Because Bollard uses the Docker-compatible REST API that Podman exposes, the `Docker` struct works identically against both runtimes. `connect_with_podman_defaults` simply ensures the right socket is selected on Podman-only hosts. All other Bollard APIs — containers, images, volumes, networks — work without modification.
+
+<CardGroup cols={2}>
+  <Card title="connect_with_podman_defaults" icon="circle-check">
+    Best choice when targeting hosts that may run Podman, rootless Podman, or a Podman-to-Docker socket shim. Performs automatic discovery with Docker fallback.
+  </Card>
+  <Card title="connect_with_local_defaults" icon="circle-dot">
+    Best choice when targeting standard Docker installations. Uses `DOCKER_HOST` / context resolution and defaults to `/var/run/docker.sock`.
+  </Card>
+</CardGroup>

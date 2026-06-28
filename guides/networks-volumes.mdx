@@ -1,0 +1,276 @@
+---
+title: "Managing Docker Networks and Volumes in Bollard"
+sidebarTitle: "Networks & Volumes"
+description: "Create, inspect, connect, and remove Docker networks and volumes programmatically with Bollard's async network and volume APIs."
+---
+
+Bollard provides async methods for the full Docker network and volume lifecycle. Networks let containers communicate with each other; volumes provide persistent, container-independent storage. Both APIs are accessed through the `Docker` struct.
+
+---
+
+## Networks
+
+### Listing Networks
+
+`list_networks` returns `Vec<Network>`. Use `ListNetworksOptionsBuilder` to filter by `driver`, `label`, `name`, or `type`.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListNetworksOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("label", vec!["maintainer=alice"]);
+
+let networks = docker
+    .list_networks(Some(
+        ListNetworksOptionsBuilder::default()
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+for net in &networks {
+    println!("{:?} — driver: {:?}", net.name, net.driver);
+}
+```
+
+### Creating a Network
+
+`create_network` takes a `NetworkCreateRequest` from `bollard::models` and returns `NetworkCreateResponse`.
+
+```rust
+use bollard::Docker;
+use bollard::models::NetworkCreateRequest;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = NetworkCreateRequest {
+    name: String::from("my-bridge-net"),
+    driver: Some(String::from("bridge")),
+    ..Default::default()
+};
+
+let response = docker.create_network(config).await?;
+println!("Network ID: {:?}", response.id);
+```
+
+<Tip>
+  Omitting `driver` defaults to `bridge`. Use `"overlay"` for Swarm-mode
+  multi-host networking.
+</Tip>
+
+### Inspecting a Network
+
+`inspect_network` returns `NetworkInspect` with IPAM configuration, connected containers, and options.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::InspectNetworkOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let info = docker
+    .inspect_network(
+        "my-bridge-net",
+        Some(
+            InspectNetworkOptionsBuilder::default()
+                .verbose(true)
+                .scope("local")
+                .build(),
+        ),
+    )
+    .await?;
+
+println!("Containers: {:?}", info.containers);
+```
+
+### Connecting a Container to a Network
+
+`connect_network` attaches a running container to a network. You can optionally assign a static IP address via `EndpointSettings`.
+
+```rust
+use bollard::Docker;
+use bollard::models::{NetworkConnectRequest, EndpointSettings, EndpointIpamConfig};
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = NetworkConnectRequest {
+    container: String::from("my-app"),
+    endpoint_config: Some(EndpointSettings {
+        ipam_config: Some(EndpointIpamConfig {
+            ipv4_address: Some(String::from("172.24.56.89")),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }),
+};
+
+docker.connect_network("my-bridge-net", config).await?;
+```
+
+### Disconnecting a Container
+
+```rust
+use bollard::Docker;
+use bollard::models::NetworkDisconnectRequest;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = NetworkDisconnectRequest {
+    container: String::from("my-app"),
+    force: Some(false),
+};
+
+docker.disconnect_network("my-bridge-net", config).await?;
+```
+
+### Removing a Network
+
+```rust
+let docker = bollard::Docker::connect_with_socket_defaults().unwrap();
+docker.remove_network("my-bridge-net").await?;
+```
+
+<Note>
+  A network cannot be removed while containers are connected to it. Disconnect
+  all containers first, or use `prune_networks`.
+</Note>
+
+### Pruning Unused Networks
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::PruneNetworksOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("label", vec!["maintainer=alice"]);
+
+let result = docker
+    .prune_networks(Some(
+        PruneNetworksOptionsBuilder::default()
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+println!("Pruned networks: {:?}", result.networks_deleted);
+```
+
+---
+
+## Volumes
+
+### Listing Volumes
+
+`list_volumes` returns `VolumeListResponse`, which wraps a `volumes` field (`Vec<Volume>`) and optional warnings.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListVolumesOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("dangling", vec!["1"]);
+
+let result = docker
+    .list_volumes(Some(
+        ListVolumesOptionsBuilder::default()
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+for vol in result.volumes.unwrap_or_default() {
+    println!("{} — driver: {}", vol.name, vol.driver);
+}
+```
+
+### Creating a Volume
+
+`create_volume` takes a `VolumeCreateRequest` and returns a `Volume` struct.
+
+```rust
+use bollard::Docker;
+use bollard::models::VolumeCreateRequest;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let config = VolumeCreateRequest {
+    name: Some(String::from("app-data")),
+    driver: Some(String::from("local")),
+    ..Default::default()
+};
+
+let volume = docker.create_volume(config).await?;
+println!("Created volume: {} at {}", volume.name, volume.mountpoint);
+```
+
+### Inspecting a Volume
+
+```rust
+use bollard::Docker;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let vol = docker.inspect_volume("app-data").await?;
+println!("Mountpoint: {}", vol.mountpoint);
+println!("Driver: {}", vol.driver);
+```
+
+### Removing a Volume
+
+Pass `force(true)` to remove a volume even if it is in use.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::RemoveVolumeOptionsBuilder;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+docker
+    .remove_volume(
+        "app-data",
+        Some(RemoveVolumeOptionsBuilder::default().force(false).build()),
+    )
+    .await?;
+```
+
+### Pruning Unused Volumes
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::PruneVolumesOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("label", vec!["env=staging"]);
+
+let result = docker
+    .prune_volumes(Some(
+        PruneVolumesOptionsBuilder::default()
+            .filters(&filters)
+            .build(),
+    ))
+    .await?;
+
+println!(
+    "Reclaimed: {:?} bytes from {:?} volumes",
+    result.space_reclaimed,
+    result.volumes_deleted.as_ref().map(|v| v.len())
+);
+```
+
+<Warning>
+  `prune_volumes` permanently deletes all anonymous volumes not referenced by
+  any container. Pass a `label` filter to restrict the scope.
+</Warning>

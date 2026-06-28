@@ -1,0 +1,689 @@
+---
+title: "Containers API Reference for Bollard"
+sidebarTitle: "Containers"
+description: "Complete reference for all Bollard container methods: list, create, start, stop, inspect, attach, stats, exec, and more with parameter details."
+---
+
+The container API covers the full lifecycle of Docker containers — from creation through runtime management to removal. All methods are on the `Docker` struct. Options structs live in `bollard::query_parameters` and body structs live in `bollard::models`.
+
+## Methods
+
+### `list_containers`
+
+```rust
+pub async fn list_containers(
+    &self,
+    options: Option<ListContainersOptions>,
+) -> Result<Vec<ContainerSummary>, Error>
+```
+
+Returns a list of containers. By default only running containers are returned.
+
+**Options:** `ListContainersOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `all` | `bool` | Return all containers including stopped ones. |
+| `limit` | `i64` | Maximum number of containers to return. |
+| `size` | `bool` | Include the size of container root filesystem. |
+| `filters` | `&HashMap<String, Vec<String>>` | Filter by `status`, `name`, `label`, `health`, `network`, `id`, etc. |
+
+**Returns:** `Vec<ContainerSummary>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListContainersOptionsBuilder;
+use std::collections::HashMap;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut filters = HashMap::new();
+filters.insert("health".to_string(), vec!["unhealthy".to_string()]);
+
+let options = ListContainersOptionsBuilder::default()
+    .all(true)
+    .filters(&filters)
+    .build();
+
+let containers = docker.list_containers(Some(options)).await.unwrap();
+```
+
+---
+
+### `create_container`
+
+```rust
+pub async fn create_container(
+    &self,
+    options: Option<CreateContainerOptions>,
+    config: ContainerCreateBody,
+) -> Result<ContainerCreateResponse, Error>
+```
+
+Prepares a container for a subsequent `start_container` call.
+
+**Options:** `CreateContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `&str` | Assign a name to the container. |
+| `platform` | `&str` | Target platform (e.g. `"linux/amd64"`). |
+
+**Config:** `bollard::models::ContainerCreateBody` — key fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | `Option<String>` | Image name/tag to base the container on. |
+| `cmd` | `Option<Vec<String>>` | Command override for the container entrypoint. |
+| `env` | `Option<Vec<String>>` | Environment variables as `KEY=value` strings. |
+| `exposed_ports` | `Option<HashMap<String, Value>>` | Ports to expose. |
+| `host_config` | `Option<HostConfig>` | Runtime resource constraints, mounts, port bindings, restart policy, etc. |
+
+**Returns:** `ContainerCreateResponse` — contains `id` and `warnings`.
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::CreateContainerOptionsBuilder;
+use bollard::models::ContainerCreateBody;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = CreateContainerOptionsBuilder::default()
+    .name("my-container")
+    .build();
+
+let config = ContainerCreateBody {
+    image: Some("alpine:latest".to_string()),
+    cmd: Some(vec!["echo".to_string(), "hello".to_string()]),
+    ..Default::default()
+};
+
+let response = docker.create_container(Some(options), config).await.unwrap();
+println!("Created container ID: {}", response.id);
+```
+
+---
+
+### `start_container`
+
+```rust
+pub async fn start_container(
+    &self,
+    container_name: &str,
+    options: Option<StartContainerOptions>,
+) -> Result<(), Error>
+```
+
+Starts a container that was previously created with `create_container`. Pass `None` for options unless you need to supply a `detach_keys` override.
+
+**Returns:** `()`
+
+```rust
+docker.start_container("my-container", None).await.unwrap();
+```
+
+---
+
+### `stop_container`
+
+```rust
+pub async fn stop_container(
+    &self,
+    container_name: &str,
+    options: Option<StopContainerOptions>,
+) -> Result<(), Error>
+```
+
+Sends `SIGTERM` to the container and waits for it to stop, then sends `SIGKILL` if the timeout elapses.
+
+**Options:** `StopContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `t` | `i64` | Seconds to wait before forcibly killing the container. |
+
+**Returns:** `()`
+
+```rust
+use bollard::query_parameters::StopContainerOptionsBuilder;
+
+let options = StopContainerOptionsBuilder::default().t(30).build();
+docker.stop_container("my-container", Some(options)).await.unwrap();
+```
+
+---
+
+### `restart_container`
+
+```rust
+pub async fn restart_container(
+    &self,
+    container_name: &str,
+    options: Option<RestartContainerOptions>,
+) -> Result<(), Error>
+```
+
+**Options:** `RestartContainerOptionsBuilder` — `t: i64` seconds to wait before kill.
+
+**Returns:** `()`
+
+---
+
+### `kill_container`
+
+```rust
+pub async fn kill_container(
+    &self,
+    container_name: &str,
+    options: Option<KillContainerOptions>,
+) -> Result<(), Error>
+```
+
+Sends a signal to a container without waiting for it to stop.
+
+**Options:** `KillContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `signal` | `&str` | Signal name or number (e.g. `"SIGINT"`, `"9"`). Defaults to `SIGKILL`. |
+
+**Returns:** `()`
+
+---
+
+### `pause_container`
+
+```rust
+pub async fn pause_container(&self, container_name: &str) -> Result<(), Error>
+```
+
+Freezes all processes in the container using the cgroups freezer. No options.
+
+**Returns:** `()`
+
+---
+
+### `unpause_container`
+
+```rust
+pub async fn unpause_container(&self, container_name: &str) -> Result<(), Error>
+```
+
+Resumes a container that was paused with `pause_container`. No options.
+
+**Returns:** `()`
+
+---
+
+### `rename_container`
+
+```rust
+pub async fn rename_container(
+    &self,
+    container_name: &str,
+    options: RenameContainerOptions,
+) -> Result<(), Error>
+```
+
+**Options:** `RenameContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `&str` | The new name for the container. |
+
+**Returns:** `()`
+
+---
+
+### `update_container`
+
+```rust
+pub async fn update_container(
+    &self,
+    container_name: &str,
+    config: ContainerUpdateBody,
+) -> Result<(), Error>
+```
+
+Updates runtime resource constraints on a running container without restarting it.
+
+**Config:** `bollard::models::ContainerUpdateBody` — notable fields: `memory`, `memory_swap`, `cpu_shares`, `cpu_period`, `cpu_quota`, `cpuset_cpus`, `restart_policy`.
+
+**Returns:** `()`
+
+---
+
+### `remove_container`
+
+```rust
+pub async fn remove_container(
+    &self,
+    container_name: &str,
+    options: Option<RemoveContainerOptions>,
+) -> Result<(), Error>
+```
+
+**Options:** `RemoveContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `v` | `bool` | Remove anonymous volumes attached to the container. |
+| `force` | `bool` | Force-remove even if the container is running. |
+| `link` | `bool` | Remove the specified link and not the underlying container. |
+
+**Returns:** `()`
+
+---
+
+### `inspect_container`
+
+```rust
+pub async fn inspect_container(
+    &self,
+    container_name: &str,
+    options: Option<InspectContainerOptions>,
+) -> Result<ContainerInspectResponse, Error>
+```
+
+Returns low-level information about a container including its state, mounts, network settings, and host config.
+
+**Options:** `InspectContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `size` | `bool` | Return the sizes of `SizeRootFs` and `SizeRw`. |
+
+**Returns:** `ContainerInspectResponse`
+
+---
+
+### `attach_container`
+
+```rust
+pub async fn attach_container(
+    &self,
+    container_name: &str,
+    options: Option<AttachContainerOptions>,
+) -> Result<AttachContainerResults, Error>
+```
+
+Attaches to a running container to read its output or write to its stdin over an HTTP upgrade connection.
+
+**Options:** `AttachContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stdin` | `bool` | Attach to container stdin. |
+| `stdout` | `bool` | Attach to container stdout. |
+| `stderr` | `bool` | Attach to container stderr. |
+| `stream` | `bool` | Stream live output. |
+| `logs` | `bool` | Replay container logs. |
+| `detach_keys` | `&str` | Key sequence for detaching (e.g. `"ctrl-c"`). |
+
+**Returns:** `AttachContainerResults`
+
+```rust
+pub struct AttachContainerResults {
+    pub output: Pin<Box<dyn Stream<Item = Result<LogOutput, Error>> + Send>>,
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+}
+```
+
+`output` is a `Stream` of `LogOutput` items. `input` is an `AsyncWrite` handle for sending data to the container's stdin.
+
+---
+
+### `attach_container_websocket`
+
+```rust
+pub async fn attach_container_websocket(
+    &self,
+    container_name: &str,
+    options: Option<AttachContainerOptions>,
+) -> Result<AttachContainerResults, Error>
+```
+
+Attaches via the WebSocket protocol (`GET /containers/{id}/attach/ws`). Returns the same `AttachContainerResults` structure as `attach_container`.
+
+<Warning>
+Requires the `websocket` Cargo feature. Docker's WebSocket attach endpoint uses `golang.org/x/net/websocket` server-side, which has known RFC 6455 compatibility issues. For production workloads prefer `attach_container` (HTTP upgrade over TCP).
+</Warning>
+
+---
+
+### `resize_container_tty`
+
+```rust
+pub async fn resize_container_tty(
+    &self,
+    container_name: &str,
+    options: ResizeContainerTTYOptions,
+) -> Result<(), Error>
+```
+
+Resizes the TTY of a running container. Only meaningful when the container was created with `tty: true`.
+
+**Options:** `ResizeContainerTTYOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `h` | `i64` | Height of the TTY in rows. |
+| `w` | `i64` | Width of the TTY in columns. |
+
+**Returns:** `()`
+
+---
+
+### `top_processes`
+
+```rust
+pub async fn top_processes(
+    &self,
+    container_name: &str,
+    options: Option<TopOptions>,
+) -> Result<ContainerTopResponse, Error>
+```
+
+Lists processes running inside a container, similar to `docker top`.
+
+**Options:** `TopOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ps_args` | `&str` | `ps` arguments to pass (e.g. `"aux"`). |
+
+**Returns:** `ContainerTopResponse` — contains `titles: Vec<String>` and `processes: Vec<Vec<String>>`.
+
+---
+
+### `container_changes`
+
+```rust
+pub async fn container_changes(
+    &self,
+    container_name: &str,
+) -> Result<Option<Vec<FilesystemChange>>, Error>
+```
+
+Returns a list of filesystem changes inside the container since it was created. No options parameter.
+
+**Returns:** `Option<Vec<FilesystemChange>>` — `None` if there are no changes.
+
+Each `FilesystemChange` has a `path: String` and `kind: ChangeType` (`0` = modified, `1` = added, `2` = deleted).
+
+---
+
+### `stats`
+
+```rust
+pub fn stats(
+    &self,
+    container_name: &str,
+    options: Option<StatsOptions>,
+) -> impl Stream<Item = Result<ContainerStatsResponse, Error>>
+```
+
+Returns a live stream of resource usage statistics for a container (CPU, memory, network I/O, block I/O).
+
+**Options:** `StatsOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stream` | `bool` | Stream stats continuously. Set `false` for a single snapshot. |
+| `one_shot` | `bool` | Do not pre-read stats; get one result and close. |
+
+**Returns:** `impl Stream<Item = Result<ContainerStatsResponse, Error>>`
+
+<Note>
+`stats` returns a `Stream`. Consume it with `StreamExt::next` or `TryStreamExt::try_next`. When `stream: false`, the stream produces exactly one item then closes.
+</Note>
+
+---
+
+### `prune_containers`
+
+```rust
+pub async fn prune_containers(
+    &self,
+    options: Option<PruneContainersOptions>,
+) -> Result<ContainerPruneResponse, Error>
+```
+
+Deletes all stopped containers.
+
+**Options:** `PruneContainersOptionsBuilder` — supports `filters` (`until`, `label`).
+
+**Returns:** `ContainerPruneResponse` — contains `containers_deleted: Vec<String>` and `space_reclaimed: i64`.
+
+---
+
+### `upload_to_container`
+
+```rust
+pub async fn upload_to_container(
+    &self,
+    container_name: &str,
+    options: Option<UploadToContainerOptions>,
+    tar: BodyType,
+) -> Result<(), Error>
+```
+
+Uploads a tar archive and extracts it into the container filesystem. Use `bollard::body_full(bytes)` for in-memory data or `bollard::body_try_stream(stream)` for streaming uploads.
+
+**Options:** `UploadToContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | `&str` | Destination path inside the container (e.g. `"/opt"`). |
+
+**Returns:** `()`
+
+---
+
+### `upload_to_container_streaming`
+
+```rust
+#[deprecated(since = "0.19.0", note = "Use upload_to_container")]
+pub async fn upload_to_container_streaming(
+    &self,
+    container_name: &str,
+    options: Option<UploadToContainerOptions>,
+    tar: impl Stream<Item = Bytes> + Send + 'static,
+) -> Result<(), Error>
+```
+
+<Warning>
+Deprecated since 0.19.0. Use `upload_to_container` with `bollard::body_stream(stream)` instead.
+</Warning>
+
+---
+
+### `get_container_archive_info`
+
+```rust
+pub async fn get_container_archive_info(
+    &self,
+    container_name: &str,
+    options: Option<ContainerArchiveInfoOptions>,
+) -> Result<PathStatResponse, Error>
+```
+
+Returns filesystem metadata for a path inside the container via a `HEAD` request. The result is decoded from the `X-Docker-Container-Path-Stat` response header.
+
+**Options:** `ContainerArchiveInfoOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | `&str` | Path inside the container to inspect. |
+
+**Returns:** `PathStatResponse` — contains `name`, `size`, `file_mode`, `modification_time`, `link_target`.
+
+---
+
+### `create_checkpoint`
+
+```rust
+pub async fn create_checkpoint(
+    &self,
+    container_name: &str,
+    options: CreateCheckpointOptions,
+) -> Result<(), Error>
+```
+
+Creates a CRIU checkpoint from a running container.
+
+**Config:** `bollard::container::CreateCheckpointOptions`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `checkpoint_id` | `String` | Name for the checkpoint. |
+| `checkpoint_dir` | `Option<String>` | Custom checkpoint storage directory. |
+| `exit` | `bool` | Stop the container after creating the checkpoint. |
+
+<Warning>
+Experimental feature. Requires Docker daemon with experimental features enabled and CRIU installed on the host (Linux only).
+</Warning>
+
+---
+
+### `list_checkpoints`
+
+```rust
+pub async fn list_checkpoints(
+    &self,
+    container_name: &str,
+    options: Option<ListCheckpointsOptions>,
+) -> Result<Vec<Checkpoint>, Error>
+```
+
+Lists all checkpoints for a container. Returns an empty `Vec` if no checkpoints exist.
+
+**Options:** `bollard::container::ListCheckpointsOptions` — `checkpoint_dir: Option<String>`.
+
+**Returns:** `Vec<Checkpoint>` — each item has a `name: String`.
+
+---
+
+### `delete_checkpoint`
+
+```rust
+pub async fn delete_checkpoint(
+    &self,
+    container_name: &str,
+    checkpoint_id: &str,
+    options: Option<DeleteCheckpointOptions>,
+) -> Result<(), Error>
+```
+
+Deletes a named checkpoint.
+
+**Options:** `bollard::container::DeleteCheckpointOptions` — `checkpoint_dir: Option<String>`.
+
+**Returns:** `()`
+
+---
+
+## Container Lifecycle Example
+
+<CodeGroup>
+
+```rust Create → Start → Stats → Remove
+use bollard::Docker;
+use bollard::models::ContainerCreateBody;
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder,
+    StatsOptionsBuilder,
+    RemoveContainerOptionsBuilder,
+};
+use futures_util::StreamExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    // 1. Create
+    let options = CreateContainerOptionsBuilder::default()
+        .name("demo-container")
+        .build();
+    let config = ContainerCreateBody {
+        image: Some("alpine:latest".to_string()),
+        cmd: Some(vec!["sleep".to_string(), "60".to_string()]),
+        ..Default::default()
+    };
+    let created = docker.create_container(Some(options), config).await.unwrap();
+    println!("Container ID: {}", created.id);
+
+    // 2. Start
+    docker.start_container(&created.id, None).await.unwrap();
+    println!("Container started");
+
+    // 3. One-shot stats
+    let stats_options = StatsOptionsBuilder::default()
+        .stream(false)
+        .one_shot(true)
+        .build();
+    let mut stats_stream = docker.stats(&created.id, Some(stats_options));
+    if let Some(Ok(stats)) = stats_stream.next().await {
+        println!("CPU usage: {:?}", stats.cpu_stats);
+    }
+
+    // 4. Remove (force)
+    let rm_options = RemoveContainerOptionsBuilder::default()
+        .force(true)
+        .build();
+    docker.remove_container(&created.id, Some(rm_options)).await.unwrap();
+    println!("Container removed");
+}
+```
+
+```rust Attach and Send Input
+use bollard::Docker;
+use bollard::query_parameters::AttachContainerOptionsBuilder;
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
+
+#[tokio::main]
+async fn main() {
+    let docker = Docker::connect_with_socket_defaults().unwrap();
+
+    let options = AttachContainerOptionsBuilder::default()
+        .stdin(true)
+        .stdout(true)
+        .stderr(true)
+        .stream(true)
+        .build();
+
+    let mut results = docker
+        .attach_container("my-container", Some(options))
+        .await
+        .unwrap();
+
+    // Write to stdin
+    results.input.write_all(b"ls -la\n").await.unwrap();
+
+    // Read output
+    while let Some(output) = results.output.next().await {
+        match output {
+            Ok(msg) => print!("{msg}"),
+            Err(e) => eprintln!("Error: {e}"),
+        }
+    }
+}
+```
+
+</CodeGroup>
+
+## `LogOutput` Enum
+
+`LogOutput` is the item type yielded by `attach_container`, `logs`, and `start_exec` streams.
+
+```rust
+pub enum LogOutput {
+    StdErr { message: Bytes },
+    StdOut { message: Bytes },
+    StdIn  { message: Bytes },
+    Console { message: Bytes },
+}
+```
+
+It implements `Display` (UTF-8 lossy decode) and `AsRef<[u8]>`. The raw bytes can be retrieved with `into_bytes() -> Bytes`.

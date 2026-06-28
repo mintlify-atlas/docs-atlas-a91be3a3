@@ -1,0 +1,347 @@
+---
+title: "Services API Reference for Bollard"
+sidebarTitle: "Services"
+description: "Reference for Bollard service methods: list, create, inspect, update, and delete Docker Swarm services."
+---
+
+Docker Swarm services are the primary scheduling primitive: they declare a desired state (image, replicas, placement, network) that the swarm continuously reconciles. Bollard exposes the full services API through the `Docker` client. All methods are `async` and return `Result<T, bollard::errors::Error>`.
+
+<Note>
+Docker Swarm mode must be enabled on the daemon before using any service methods. Initialise a swarm with [`init_swarm`](/api-reference/swarm#init_swarm) first.
+</Note>
+
+---
+
+## `list_services`
+
+Return a filtered list of services running in the swarm.
+
+```rust
+pub async fn list_services(
+    &self,
+    options: Option<ListServicesOptions>,
+) -> Result<Vec<Service>, Error>
+```
+
+### Options — `ListServicesOptionsBuilder`
+
+| Builder method | Description |
+|---|---|
+| `.filters(&HashMap<&str, Vec<&str>>)` | Filter by `id`, `label`, `mode` (`replicated` \| `global`), or `name`. |
+| `.status(bool)` | Include service task counts in the response. |
+
+### Returns
+
+`Result<Vec<Service>, Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::ListServicesOptionsBuilder;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let mut filters = HashMap::new();
+    filters.insert("mode", vec!["replicated"]);
+
+    let options = ListServicesOptionsBuilder::default()
+        .filters(&filters)
+        .build();
+
+    let services = docker.list_services(Some(options)).await?;
+    for svc in &services {
+        println!("{:?}", svc.spec.as_ref().and_then(|s| s.name.as_ref()));
+    }
+    Ok(())
+}
+```
+
+---
+
+## `create_service`
+
+Dispatch a new service onto the swarm. Optionally pass `DockerCredentials` when the service image resides in a private registry.
+
+```rust
+pub async fn create_service(
+    &self,
+    service_spec: ServiceSpec,
+    credentials: Option<DockerCredentials>,
+) -> Result<ServiceCreateResponse, Error>
+```
+
+### Key `ServiceSpec` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `Option<String>` | Human-readable service name. |
+| `task_template` | `Option<TaskSpec>` | Container configuration including image, command, environment, and mounts. |
+| `mode` | `Option<ServiceSpecMode>` | Scheduling mode: `Replicated` (with `replicas` count) or `Global`. |
+| `update_config` | `Option<ServiceUpdateConfig>` | Rolling-update behaviour (parallelism, delay, failure action). |
+| `rollback_config` | `Option<ServiceRollbackConfig>` | Rollback behaviour when an update fails. |
+| `networks` | `Option<Vec<NetworkAttachmentConfig>>` | Networks to attach the service to. |
+| `endpoint_spec` | `Option<EndpointSpec>` | Published ports and VIP/DNSRR endpoint mode. |
+
+#### Key `TaskSpec` → `ContainerSpec` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `image` | `Option<String>` | Container image reference, e.g. `"nginx:latest"`. |
+| `command` | `Option<Vec<String>>` | Override the image entrypoint. |
+| `args` | `Option<Vec<String>>` | Arguments passed to the entrypoint. |
+| `env` | `Option<Vec<String>>` | Environment variables in `KEY=value` format. |
+| `mounts` | `Option<Vec<Mount>>` | Volume/bind/tmpfs mounts. |
+| `secrets` | `Option<Vec<SecretReference>>` | Secrets to inject into the container. |
+| `configs` | `Option<Vec<ConfigReference>>` | Configs to inject into the container. |
+
+### Returns
+
+`Result<ServiceCreateResponse, Error>` — contains `id` and `warnings`.
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::service::{
+    ServiceSpec, ServiceSpecMode, ServiceSpecModeReplicated,
+    TaskSpec, TaskSpecContainerSpec,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let service = ServiceSpec {
+        name: Some("web".to_string()),
+        mode: Some(ServiceSpecMode {
+            replicated: Some(ServiceSpecModeReplicated {
+                replicas: Some(3),
+            }),
+            ..Default::default()
+        }),
+        task_template: Some(TaskSpec {
+            container_spec: Some(TaskSpecContainerSpec {
+                image: Some("nginx:latest".to_string()),
+                env: Some(vec!["NGINX_PORT=80".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let response = docker.create_service(service, None).await?;
+    println!("Created service ID: {:?}", response.id);
+    Ok(())
+}
+```
+
+---
+
+## `inspect_service`
+
+Fetch detailed information about a single service by name or ID.
+
+```rust
+pub async fn inspect_service(
+    &self,
+    service_name: &str,
+    options: Option<InspectServiceOptions>,
+) -> Result<Service, Error>
+```
+
+### Options — `InspectServiceOptionsBuilder`
+
+| Builder method | Description |
+|---|---|
+| `.insert_defaults(bool)` | Fill in default values for fields that were not explicitly set. |
+
+### Returns
+
+`Result<Service, Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::InspectServiceOptionsBuilder;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = InspectServiceOptionsBuilder::default()
+        .insert_defaults(true)
+        .build();
+
+    let service = docker.inspect_service("web", Some(options)).await?;
+    println!("Version: {:?}", service.version);
+    Ok(())
+}
+```
+
+---
+
+## `delete_service`
+
+Remove a service and stop all associated tasks.
+
+```rust
+pub async fn delete_service(
+    &self,
+    service_name: &str,
+) -> Result<(), Error>
+```
+
+### Returns
+
+`Result<(), Error>`
+
+### Example
+
+```rust
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+    docker.delete_service("web").await?;
+    println!("Service deleted");
+    Ok(())
+}
+```
+
+---
+
+## `update_service`
+
+Apply a new `ServiceSpec` to an existing service. The `version` option must match the service's current version to prevent lost-update races.
+
+```rust
+pub async fn update_service(
+    &self,
+    service_name: &str,
+    service_spec: ServiceSpec,
+    options: UpdateServiceOptions,
+    credentials: Option<DockerCredentials>,
+) -> Result<ServiceUpdateResponse, Error>
+```
+
+### Options — `UpdateServiceOptionsBuilder`
+
+| Builder method | Type | Description |
+|---|---|---|
+| `.version(i32)` | `i32` | **Required.** Current version index from `inspect_service`. |
+| `.registry_auth_from(&str)` | `&str` | Where to pull registry auth from: `"spec"` or `"previous-spec"`. |
+| `.rollback(&str)` | `&str` | Set to `"previous"` to roll back to the previous spec. |
+
+### Returns
+
+`Result<ServiceUpdateResponse, Error>` — contains `warnings`.
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::UpdateServiceOptionsBuilder;
+use bollard::service::{
+    ServiceSpec, ServiceSpecMode, ServiceSpecModeReplicated,
+    TaskSpec, TaskSpecContainerSpec,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let service_name = "web";
+    let current_version = docker
+        .inspect_service(service_name, None)
+        .await?
+        .version
+        .unwrap()
+        .index
+        .unwrap();
+
+    let new_spec = ServiceSpec {
+        name: Some(service_name.to_string()),
+        mode: Some(ServiceSpecMode {
+            replicated: Some(ServiceSpecModeReplicated { replicas: Some(5) }),
+            ..Default::default()
+        }),
+        task_template: Some(TaskSpec {
+            container_spec: Some(TaskSpecContainerSpec {
+                image: Some("nginx:1.25".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let options = UpdateServiceOptionsBuilder::default()
+        .version(current_version as i32)
+        .build();
+
+    let response = docker.update_service(service_name, new_spec, options, None).await?;
+    println!("Update warnings: {:?}", response.warnings);
+    Ok(())
+}
+```
+
+<Tip>
+Always read the current service spec with `inspect_service` and modify only the fields you need before calling `update_service`. Sending a partially filled `ServiceSpec` can reset unset fields to their defaults.
+</Tip>
+
+---
+
+## `service_logs`
+
+Stream `stdout`/`stderr` log output from a service. Returns a `Stream` of `LogOutput` items.
+
+```rust
+pub fn service_logs(
+    &self,
+    service_id: &str,
+    options: Option<impl Into<LogsOptions>>,
+) -> impl Stream<Item = Result<LogOutput, Error>>
+```
+
+### Options — `LogsOptionsBuilder`
+
+| Builder method | Description |
+|---|---|
+| `.stdout(bool)` | Include stdout. |
+| `.stderr(bool)` | Include stderr. |
+| `.follow(bool)` | Stream new log entries as they arrive. |
+| `.timestamps(bool)` | Prefix each line with an RFC 3339 timestamp. |
+| `.since(i64)` | Show logs since a Unix timestamp. |
+| `.tail(&str)` | Number of lines from end, e.g. `"100"` or `"all"`. |
+
+### Example
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LogsOptionsBuilder;
+use futures_util::stream::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), bollard::errors::Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    let options = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .tail("50")
+        .build();
+
+    let mut log_stream = docker.service_logs("web", Some(options));
+    while let Some(chunk) = log_stream.try_next().await? {
+        print!("{}", chunk);
+    }
+    Ok(())
+}
+```

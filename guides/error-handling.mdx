@@ -1,0 +1,268 @@
+---
+title: "Error Handling in Bollard: Typed Docker Errors"
+sidebarTitle: "Error Handling"
+description: "Bollard returns typed errors via the bollard::errors::Error enum. Learn to handle Docker server errors, timeouts, stream errors, and TLS failures."
+---
+
+Every fallible operation in Bollard returns `Result<T, bollard::errors::Error>`. The `Error` type is a `#[non_exhaustive]` enum built with [`thiserror`](https://docs.rs/thiserror), so it integrates with the standard `?` operator and can be wrapped by any error handling library (e.g. `anyhow`, `color-eyre`).
+
+## The `bollard::errors::Error` Enum
+
+```rust
+use bollard::errors::Error;
+```
+
+`Error` is declared as:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    // ... variants
+}
+```
+
+The `#[non_exhaustive]` attribute means the enum can gain new variants in minor releases. **Always include a catch-all `_` arm** in `match` expressions.
+
+## Key Variants
+
+### `DockerResponseServerError`
+
+Returned when the Docker daemon responds with an HTTP error status code (4xx or 5xx).
+
+```rust
+Error::DockerResponseServerError {
+    status_code: u16,  // e.g. 404, 409, 500
+    message: String,   // human-readable message from the daemon
+}
+```
+
+Common causes: image not found (404), name conflict (409), server failure (500).
+
+---
+
+### `JsonDataError`
+
+Emitted when Bollard cannot deserialize the JSON response from the Docker API.
+
+```rust
+Error::JsonDataError {
+    message: String,  // excerpt of the JSON near the error
+    column: usize,    // character position of the error
+    // `contents: String` is also present when the
+    // `json_data_content` Cargo feature is enabled
+}
+```
+
+<Tip>
+  Enable the `json_data_content` feature in `Cargo.toml` to include the full
+  JSON response body in the error for easier debugging:
+
+  ```toml
+  bollard = { version = "...", features = ["json_data_content"] }
+  ```
+</Tip>
+
+---
+
+### `RequestTimeoutError`
+
+Emitted when an HTTP request exceeds the configured timeout.
+
+```rust
+Error::RequestTimeoutError
+```
+
+---
+
+### `DockerStreamError`
+
+Emitted mid-stream during a successful streaming operation (e.g. `build_image`, `create_image`, `push_image`) when the daemon embeds an error object in the stream JSON.
+
+```rust
+Error::DockerStreamError {
+    error: String,  // the error message from the stream payload
+}
+```
+
+---
+
+### `DockerContainerWaitError`
+
+Returned by `wait_container` when the container exits with a non-zero status code.
+
+```rust
+Error::DockerContainerWaitError {
+    error: String,  // error message if present
+    code: i64,      // exit code of the container
+}
+```
+
+---
+
+### `APIVersionParseError`
+
+Emitted when Bollard cannot parse the Docker API version string.
+
+```rust
+Error::APIVersionParseError {}
+```
+
+---
+
+### TLS / Certificate Variants (feature-gated)
+
+These variants are only present when the `ssl_providerless` feature is enabled.
+
+| Variant | Description |
+|---|---|
+| `CertPathError { path }` | Cannot open or read a certificate file at `path` |
+| `CertMultipleKeys { count, path }` | More than one private key found in a PEM file |
+| `CertParseError { path }` | Failed to parse the private key at `path` |
+| `NoNativeCertsError { err }` | Could not parse a native PKI certificate for TLS |
+| `LoadNativeCertsErrors { errors }` | Could not load native certificates for TLS |
+
+---
+
+## Pattern Matching Example
+
+```rust
+use bollard::Docker;
+use bollard::errors::Error;
+
+async fn remove_if_exists(docker: &Docker, name: &str) -> Result<(), Error> {
+    match docker.remove_container(name, None).await {
+        Ok(()) => {
+            println!("Removed {name}");
+            Ok(())
+        }
+        Err(Error::DockerResponseServerError { status_code: 404, .. }) => {
+            // Container does not exist — treat as success
+            println!("{name} not found, skipping");
+            Ok(())
+        }
+        Err(Error::DockerResponseServerError { status_code, message }) => {
+            eprintln!("Docker error {status_code}: {message}");
+            Err(Error::DockerResponseServerError { status_code, message })
+        }
+        Err(Error::RequestTimeoutError) => {
+            eprintln!("Request timed out");
+            Err(Error::RequestTimeoutError)
+        }
+        Err(e) => {
+            // Catch-all required because Error is #[non_exhaustive]
+            eprintln!("Unexpected error: {e}");
+            Err(e)
+        }
+    }
+}
+```
+
+## Using the `?` Operator
+
+`bollard::errors::Error` implements `std::error::Error`, so it works seamlessly with `?` in functions that return `Result<_, bollard::errors::Error>` or any broader error type.
+
+```rust
+use bollard::Docker;
+use bollard::errors::Error;
+use bollard::query_parameters::CreateImageOptionsBuilder;
+use futures_util::TryStreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let docker = Docker::connect_with_socket_defaults()?;
+
+    docker
+        .create_image(
+            Some(
+                CreateImageOptionsBuilder::default()
+                    .from_image("alpine:3")
+                    .build(),
+            ),
+            None,
+            None,
+        )
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    Ok(())
+}
+```
+
+For application code, using `anyhow` or `color-eyre` lets you mix Bollard errors with other error types via `?`:
+
+```rust
+use anyhow::Result;
+use bollard::Docker;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let docker = Docker::connect_with_socket_defaults()?;
+    let info = docker.inspect_image("alpine:3").await?;
+    println!("{:?}", info.architecture);
+    Ok(())
+}
+```
+
+## Handling Stream Errors
+
+Operations like `build_image`, `create_image`, and `push_image` return a `Stream`. The Docker daemon may return an error object embedded in the stream even after the HTTP response starts with 200 OK. Bollard surfaces these as `DockerStreamError`.
+
+```rust
+use bollard::Docker;
+use bollard::errors::Error;
+use bollard::query_parameters::CreateImageOptionsBuilder;
+use futures_util::TryStreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let result = docker
+    .create_image(
+        Some(
+            CreateImageOptionsBuilder::default()
+                .from_image("does-not-exist:latest")
+                .build(),
+        ),
+        None,
+        None,
+    )
+    .try_collect::<Vec<_>>()
+    .await;
+
+match result {
+    Err(Error::DockerStreamError { error }) => {
+        eprintln!("Stream error from daemon: {error}");
+    }
+    Err(Error::DockerResponseServerError { status_code, message }) => {
+        eprintln!("HTTP {status_code}: {message}");
+    }
+    Err(e) => eprintln!("Other error: {e}"),
+    Ok(_) => println!("Done"),
+}
+```
+
+<Warning>
+  Always drive streams to completion with `.try_collect()` or
+  `.try_for_each()`. Dropping a stream mid-way may miss errors that arrive in
+  later chunks.
+</Warning>
+
+## The `#[non_exhaustive]` Rule
+
+Because `Error` is `#[non_exhaustive]`, the Rust compiler will reject exhaustive `match` expressions that do not include a wildcard arm. This protects your code against future Bollard releases that add new error kinds.
+
+```rust
+// ✅ Correct — always include a catch-all
+match err {
+    Error::DockerResponseServerError { status_code, .. } => { /* ... */ }
+    Error::RequestTimeoutError => { /* ... */ }
+    _ => { /* handle anything else */ }
+}
+
+// ❌ Will not compile if Error gains a new variant
+match err {
+    Error::DockerResponseServerError { .. } => { /* ... */ }
+    Error::RequestTimeoutError => { /* ... */ }
+    // missing wildcard — compile error
+}
+```
