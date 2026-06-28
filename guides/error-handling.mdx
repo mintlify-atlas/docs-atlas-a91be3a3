@@ -1,5 +1,5 @@
 ---
-title: "Error Handling in Bollard: Typed Docker Errors"
+title: "Error Handling in Bollard: Typed Docker Error Variants"
 sidebarTitle: "Error Handling"
 description: "Bollard returns typed errors via the bollard::errors::Error enum. Learn to handle Docker server errors, timeouts, stream errors, and TLS failures."
 ---
@@ -116,6 +116,7 @@ These variants are only present when the `ssl_providerless` feature is enabled.
 
 | Variant | Description |
 |---|---|
+| `NoHomePathError` | `DOCKER_CERT_PATH` environment variable is invalid |
 | `CertPathError { path }` | Cannot open or read a certificate file at `path` |
 | `CertMultipleKeys { count, path }` | More than one private key found in a PEM file |
 | `CertParseError { path }` | Failed to parse the private key at `path` |

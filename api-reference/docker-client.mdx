@@ -1,7 +1,7 @@
 ---
 title: "Docker Client: Connection Methods and Configuration"
 sidebarTitle: "Docker Client"
-description: "The Docker struct is the main entry point for all Bollard API calls. Reference for all connect_with_* constructors, timeout configuration, and custom transports."
+description: "The Docker struct is the entry point for all Bollard API calls. Reference for connect_with_* constructors, timeout settings, and custom transports."
 ---
 
 The `Docker` struct is the core client for every Bollard API call. Internally it wraps its transport in an `Arc`, so it is **cheaply cloneable** — cloning a `Docker` handle shares the underlying connection pool and version state with the original. All constructor methods return `Result<Docker, Error>`.

@@ -1,7 +1,7 @@
 ---
-title: "Tasks API Reference for Bollard"
+title: "Docker Swarm Tasks API Reference — Bollard Client"
 sidebarTitle: "Tasks"
-description: "Reference for Bollard task methods: list_tasks, inspect_task, and task_logs for monitoring Docker Swarm task execution."
+description: "Reference for Bollard task methods: list_tasks, inspect_task, and task_logs for querying and streaming Docker Swarm task state and logs."
 ---
 
 A Docker Swarm task is a single container instance scheduled as part of a service — the atomic unit of swarm scheduling. Tasks are created and destroyed by the swarm scheduler; you cannot directly create tasks, but you can list them, inspect their state, and stream their logs. All methods are `async` (except the streaming `task_logs`) and return `Result<T, bollard::errors::Error>`.

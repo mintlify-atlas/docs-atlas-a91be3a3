@@ -1,5 +1,5 @@
 ---
-title: "Error Types Reference for Bollard"
+title: "Error Types and Handling Reference — Bollard SDK"
 sidebarTitle: "Errors"
 description: "Complete reference for the bollard::errors::Error enum variants returned by all Bollard API methods, with pattern matching examples."
 ---
@@ -254,7 +254,7 @@ These wrap underlying library errors transparently. Their `Display` output and s
 | `URLParseError` | `url::ParseError` | A URL string could not be parsed. |
 | `InvalidURIError` | `http::uri::InvalidUri` | A URI string was malformed. |
 | `InvalidURIPartsError` | `http::uri::InvalidUriParts` | URI parts could not be assembled. |
-| `HyperLegacyError` | `hyper_util::client::legacy::Error` | Error from the legacy hyper client connector (HTTP/SSH/pipe features). |
+| `HyperLegacyError` | `hyper_util::client::legacy::Error` | Error from the legacy hyper client connector. Only present with the `http`, `ssh`, or `pipe` Cargo features. |
 | `HttpHeaderToStrError` | `http::header::ToStrError` | An HTTP header value contained non-ASCII bytes. |
 | `Base64DecodeError` | `base64::DecodeError` | Base64 decoding of a header or payload failed. |
 
@@ -268,7 +268,7 @@ These wrap underlying library errors transparently. Their `Display` output and s
 | `SocketNotFoundError(String)` | The Docker socket file was not found at the expected path. |
 | `DockerContextNotFoundError { name: String }` | A Docker context referenced by `DOCKER_CONTEXT` or `~/.docker/config.json` does not exist on disk. |
 | `HttpHeaderNotFoundError(String)` | An expected HTTP response header was absent. |
-| `WebSocketError { err }` | A WebSocket connection failed (requires the `websocket` feature). |
+| `WebSocketError { err }` | A WebSocket connection failed. Only present with the `websocket` Cargo feature. |
 
 ---
 

@@ -1,7 +1,7 @@
 ---
-title: "Plugins API Reference for Bollard"
+title: "Docker Plugins API Reference — Bollard Rust Client"
 sidebarTitle: "Plugins"
-description: "Reference for Bollard plugin methods: list, inspect, install, enable, disable, upgrade, push, create, and remove Docker plugins."
+description: "Reference for Bollard plugin methods: list, inspect, install, enable, disable, upgrade, push, create, set config, and remove Docker plugins."
 ---
 
 Docker plugins extend the Docker Engine with additional capabilities — custom volume drivers, network drivers, authorisation plugins, and more. Bollard provides a complete plugin management API through the `Docker` client. All methods are `async` and return `Result<T, bollard::errors::Error>`.
@@ -256,7 +256,7 @@ pub async fn enable_plugin(
 
 | Builder method | Type | Description |
 |---|---|---|
-| `.timeout(i64)` | `i64` | Timeout in seconds to wait for the plugin to be ready. |
+| `.timeout(i32)` | `i32` | Timeout in seconds to wait for the plugin to be ready. |
 
 ### Returns
 

@@ -1,7 +1,7 @@
 ---
-title: "Nodes API Reference for Bollard"
+title: "Docker Swarm Nodes API Reference — Bollard Client"
 sidebarTitle: "Nodes"
-description: "Reference for Bollard node methods: list, inspect, update, and delete nodes in a Docker Swarm cluster."
+description: "Reference for Bollard node methods: list_nodes, inspect_node, update_node, and delete_node for managing Docker Swarm cluster nodes."
 ---
 
 Nodes are Engine instances participating in a Docker Swarm. Bollard exposes full node management through the `Docker` client, allowing you to list, inspect, update availability/role, and delete nodes. All methods are `async` and return `Result<T, bollard::errors::Error>`.
@@ -161,7 +161,7 @@ pub async fn update_node(
 
 | Builder method | Type | Description |
 |---|---|---|
-| `.version(u64)` | `u64` | **Required.** Current version index from `inspect_node`. |
+| `.version(i64)` | `i64` | **Required.** Current version index from `inspect_node`. |
 
 ### Key `NodeSpec` fields
 

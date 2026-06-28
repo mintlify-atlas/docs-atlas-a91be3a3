@@ -1,7 +1,7 @@
 ---
-title: "Services API Reference for Bollard"
+title: "Swarm Services API Reference — Bollard Rust Client"
 sidebarTitle: "Services"
-description: "Reference for Bollard service methods: list, create, inspect, update, and delete Docker Swarm services."
+description: "Reference for Bollard service methods: list_services, create_service, inspect_service, update_service, delete_service, and service_logs for Docker Swarm."
 ---
 
 Docker Swarm services are the primary scheduling primitive: they declare a desired state (image, replicas, placement, network) that the swarm continuously reconciles. Bollard exposes the full services API through the `Docker` client. All methods are `async` and return `Result<T, bollard::errors::Error>`.

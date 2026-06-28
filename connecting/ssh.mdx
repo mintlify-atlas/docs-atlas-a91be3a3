@@ -1,7 +1,7 @@
 ---
-title: "Connect Bollard to Remote Docker via SSH Tunnel"
+title: "Connect Bollard to Remote Docker over an SSH Tunnel"
 sidebarTitle: "SSH Tunnel"
-description: "Use Bollard's SSH connector to tunnel Docker API calls over an SSH connection using openssh. Requires the ssh feature flag."
+description: "Use Bollard's SSH connector to tunnel Docker API calls over an SSH connection using openssh. Requires the ssh feature flag in Cargo.toml."
 ---
 
 Bollard can tunnel all Docker API calls over an SSH connection using the [openssh](https://crates.io/crates/openssh) crate. This means you can reach a remote Docker daemon without opening any extra TCP ports — the only requirement is an SSH connection to the remote host.

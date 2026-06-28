@@ -1,7 +1,7 @@
 ---
-title: "Docker Swarm Orchestration with Bollard"
+title: "Managing Docker Swarm Clusters and Services with Bollard"
 sidebarTitle: "Swarm"
-description: "Manage Docker Swarm clusters, services, nodes, tasks, secrets, and configs using Bollard's async Swarm API."
+description: "Orchestrate Docker Swarm clusters with Bollard: initialise swarms, deploy replicated services, manage secrets, and stream real-time task logs."
 ---
 
 Docker Swarm mode turns a group of Docker hosts into a single, fault-tolerant cluster. Bollard provides a fully asynchronous API covering every aspect of Swarm orchestration — from initialising the cluster and deploying replicated services, to managing nodes, rotating secrets, and streaming task logs. All methods are available directly on the `Docker` client struct and return `Future`s or `Stream`s that integrate naturally with Tokio.

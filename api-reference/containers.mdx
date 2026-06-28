@@ -1,7 +1,7 @@
 ---
-title: "Containers API Reference for Bollard"
+title: "Bollard Containers API: Complete Methods Reference"
 sidebarTitle: "Containers"
-description: "Complete reference for all Bollard container methods: list, create, start, stop, inspect, attach, stats, exec, and more with parameter details."
+description: "Complete reference for all Bollard container methods: list, create, start, stop, logs, stats, attach, inspect, upload, checkpoint, and more."
 ---
 
 The container API covers the full lifecycle of Docker containers — from creation through runtime management to removal. All methods are on the `Docker` struct. Options structs live in `bollard::query_parameters` and body structs live in `bollard::models`.
@@ -120,6 +120,43 @@ Starts a container that was previously created with `create_container`. Pass `No
 
 ```rust
 docker.start_container("my-container", None).await.unwrap();
+```
+
+---
+
+### `wait_container`
+
+```rust
+pub fn wait_container(
+    &self,
+    container_name: &str,
+    options: Option<WaitContainerOptions>,
+) -> impl Stream<Item = Result<ContainerWaitResponse, Error>>
+```
+
+Blocks until the container stops and returns its exit status. Returns a `Stream` that yields a single `ContainerWaitResponse` item. Non-zero exit codes are surfaced as `Err(DockerContainerWaitError { error, code })`.
+
+**Options:** `WaitContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `condition` | `&str` | Wait until a given condition is met: `"not-running"` (default), `"next-exit"`, or `"removed"`. |
+
+**Returns:** `impl Stream<Item = Result<ContainerWaitResponse, Error>>`
+
+```rust
+use bollard::Docker;
+use futures_util::StreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let mut stream = docker.wait_container("my-container", None);
+if let Some(result) = stream.next().await {
+    match result {
+        Ok(resp) => println!("Exit code: {}", resp.status_code),
+        Err(e)   => eprintln!("Wait error: {e}"),
+    }
+}
 ```
 
 ---
@@ -396,6 +433,56 @@ Lists processes running inside a container, similar to `docker top`.
 
 ---
 
+### `logs`
+
+```rust
+pub fn logs(
+    &self,
+    container_name: &str,
+    options: Option<LogsOptions>,
+) -> impl Stream<Item = Result<LogOutput, Error>>
+```
+
+Streams the log output (stdout and/or stderr) of a container. Each item is a `LogOutput` enum variant. Set `follow: true` to tail live output; set `follow: false` (or omit it) to retrieve the existing log and close the stream.
+
+**Options:** `LogsOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `follow` | `bool` | Keep the stream open and follow new log entries. |
+| `stdout` | `bool` | Include stdout log lines. |
+| `stderr` | `bool` | Include stderr log lines. |
+| `since` | `i64` | Show logs since this Unix timestamp. |
+| `until` | `i64` | Show logs up to this Unix timestamp. |
+| `timestamps` | `bool` | Prefix each line with an RFC 3339 timestamp. |
+| `tail` | `&str` | Number of lines to show from the end (e.g. `"100"`), or `"all"`. |
+
+**Returns:** `impl Stream<Item = Result<LogOutput, Error>>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::LogsOptionsBuilder;
+use futures_util::StreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = LogsOptionsBuilder::default()
+    .stdout(true)
+    .stderr(true)
+    .tail("50")
+    .build();
+
+let mut stream = docker.logs("my-container", Some(options));
+while let Some(item) = stream.next().await {
+    match item {
+        Ok(log) => print!("{log}"),
+        Err(e)  => eprintln!("Log error: {e}"),
+    }
+}
+```
+
+---
+
 ### `container_changes`
 
 ```rust
@@ -495,6 +582,81 @@ pub async fn upload_to_container_streaming(
 <Warning>
 Deprecated since 0.19.0. Use `upload_to_container` with `bollard::body_stream(stream)` instead.
 </Warning>
+
+---
+
+### `download_from_container`
+
+```rust
+pub fn download_from_container(
+    &self,
+    container_name: &str,
+    options: Option<DownloadFromContainerOptions>,
+) -> impl Stream<Item = Result<Bytes, Error>>
+```
+
+Downloads a tar archive of a path inside the container's filesystem. The archive may be compressed with gzip, bzip2, or xz depending on the daemon.
+
+**Options:** `DownloadFromContainerOptionsBuilder`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | `&str` | Path inside the container to archive (e.g. `"/opt"`). |
+
+**Returns:** `impl Stream<Item = Result<Bytes, Error>>`
+
+```rust
+use bollard::Docker;
+use bollard::query_parameters::DownloadFromContainerOptionsBuilder;
+use futures_util::TryStreamExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let options = DownloadFromContainerOptionsBuilder::default()
+    .path("/opt")
+    .build();
+
+let bytes: Vec<_> = docker
+    .download_from_container("my-container", Some(options))
+    .try_collect()
+    .await
+    .unwrap();
+println!("Downloaded {} chunks", bytes.len());
+```
+
+---
+
+### `export_container`
+
+```rust
+pub fn export_container(
+    &self,
+    container_name: &str,
+) -> impl Stream<Item = Result<Bytes, Error>>
+```
+
+Exports the entire container filesystem as an uncompressed TAR archive. No options parameter.
+
+**Returns:** `impl Stream<Item = Result<Bytes, Error>>`
+
+```rust
+use bollard::Docker;
+use futures_util::TryStreamExt;
+use tokio::io::AsyncWriteExt;
+
+let docker = Docker::connect_with_socket_defaults().unwrap();
+
+let chunks: Vec<_> = docker
+    .export_container("my-container")
+    .try_collect()
+    .await
+    .unwrap();
+
+let mut file = tokio::fs::File::create("container.tar").await.unwrap();
+for chunk in chunks {
+    file.write_all(&chunk).await.unwrap();
+}
+```
 
 ---
 

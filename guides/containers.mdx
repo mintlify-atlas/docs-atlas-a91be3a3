@@ -1,7 +1,7 @@
 ---
-title: "Working with Docker Containers in Bollard"
+title: "Working with Docker Containers in Bollard – Async API"
 sidebarTitle: "Containers"
-description: "Create, start, stop, inspect, attach, stream logs, and manage container lifecycles using Bollard's async container API."
+description: "Create, start, stop, inspect, attach, and stream logs for Docker containers using Bollard's fully async Rust container lifecycle API."
 ---
 
 Bollard exposes the full Docker container lifecycle through the `Docker` struct. Every container operation is `async`, returning either a `Future` or a `Stream`. Long-running output—logs, stats, attach—is modelled as a Rust `Stream` that you consume with `futures_util::TryStreamExt`.

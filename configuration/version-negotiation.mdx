@@ -1,5 +1,5 @@
 ---
-title: "Docker API Version Negotiation in Bollard"
+title: "Bollard Docker API Version Negotiation and Defaults"
 sidebarTitle: "Version Negotiation"
 description: "Bollard defaults to Docker API v1.53 and supports downgrade negotiation via negotiate_version() for compatibility with older Docker daemons."
 ---
@@ -20,7 +20,7 @@ pub const API_DEFAULT_VERSION: &ClientVersion = &ClientVersion {
 Every connection method (e.g. `Docker::connect_with_local_defaults()`) uses `API_DEFAULT_VERSION` unless you supply a different `ClientVersion` through the lower-level parameterised constructors such as `Docker::connect_with_http()`.
 
 <Note>
-  Bollard's serialization stubs are generated from the Docker API v1.52/v1.53 OpenAPI schema published by the [moby](https://github.com/moby/moby) project. Negotiating down to an older version changes only the URL prefix — response fields that exist only in newer API versions will simply be absent or `null`.
+  Bollard's serialization stubs are generated from the Docker API v1.53 OpenAPI schema published by the [moby](https://github.com/moby/moby) project. Negotiating down to an older version changes only the URL prefix — response fields that exist only in newer API versions will simply be absent or `null`.
 </Note>
 
 ## The `ClientVersion` Struct
@@ -181,4 +181,4 @@ println!("Pinned version: {}", docker.client_version());
 | `API_DEFAULT_VERSION` | `ClientVersion { major_version: 1, minor_version: 53 }` |
 | Default timeout | 120 seconds |
 | Negotiation endpoint | `GET /version` |
-| Serialization schema | Docker API v1.52 / v1.53 (moby OpenAPI) |
+| Serialization schema | Docker API v1.53 (moby OpenAPI) |

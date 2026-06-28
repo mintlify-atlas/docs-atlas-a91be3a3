@@ -1,5 +1,5 @@
 ---
-title: "BuildKit gRPC API Reference for Bollard"
+title: "BuildKit gRPC API Reference — Bollard Rust Client"
 sidebarTitle: "BuildKit"
 description: "Reference for Bollard's BuildKit gRPC integration: ImageBuildFrontendOptions, driver types, cache options, export types, and SSH/secret mounts."
 ---
@@ -90,7 +90,7 @@ use bollard::grpc::driver::docker_container::DockerContainer;
 Connects directly to a standalone `buildkitd` daemon over a TCP socket. Ideal for CI environments where `buildkitd` runs as a sidecar or system service.
 
 ```rust
-use bollard::grpc::driver::buildkitd::Buildkitd;
+use bollard::grpc::driver::buildkitd::BuildkitDaemon;
 ```
 
 ---

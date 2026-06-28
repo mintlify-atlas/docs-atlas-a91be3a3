@@ -1,5 +1,5 @@
 ---
-title: "Connect Bollard to a Local Docker Daemon"
+title: "Bollard Local Docker Connection: Unix Socket and Named Pipe"
 sidebarTitle: "Local Socket"
 description: "Use connect_with_local_defaults or connect_with_socket to connect Bollard to Docker via Unix socket on Linux/macOS or named pipe on Windows."
 ---
@@ -60,7 +60,6 @@ Connects to the standard Unix socket path `/var/run/docker.sock` (or `//./pipe/d
 ```rust
 use bollard::Docker;
 
-#[cfg(unix)]
 let docker = Docker::connect_with_socket_defaults().unwrap();
 ```
 

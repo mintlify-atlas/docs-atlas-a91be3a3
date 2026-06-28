@@ -1,7 +1,7 @@
 ---
-title: "Managing Docker Images with Bollard"
+title: "Managing Docker Images with Bollard – Pull, Build, Push"
 sidebarTitle: "Images"
-description: "Pull, build, tag, push, inspect, and export Docker images using Bollard's async image API with streaming build output."
+description: "Pull, build, tag, push, inspect, and export Docker images using Bollard's async Rust image API with streaming build and pull progress."
 ---
 
 Bollard provides a full set of async image management methods on the `Docker` struct. Pull, build, inspect, tag, push, and export operations are all covered. Build and pull operations return a `Stream` of progress events that you can consume incrementally.
@@ -245,12 +245,21 @@ let _bytes: Vec<_> = docker
 ```rust Import image
 use bollard::Docker;
 use bollard::body_full;
+use bollard::query_parameters::ImportImageOptionsBuilder;
+use futures_util::TryStreamExt;
 use std::fs;
 
 let docker = Docker::connect_with_socket_defaults().unwrap();
 
 let contents = fs::read("alpine.tar")?;
-docker.import_image(body_full(contents.into())).await?;
+docker
+    .import_image(
+        ImportImageOptionsBuilder::default().build(),
+        body_full(contents.into()),
+        None,
+    )
+    .try_collect::<Vec<_>>()
+    .await?;
 ```
 </CodeGroup>
 
@@ -319,7 +328,7 @@ let results = docker
     .search_images(
         bollard::query_parameters::SearchImagesOptionsBuilder::default()
             .term("alpine")
-            .limit(5u64)
+            .limit(5)
             .build(),
     )
     .await?;
